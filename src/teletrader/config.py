@@ -24,7 +24,7 @@ class Config:
     api_hash: str
     phone: str
     session_name: str
-    channel: str
+    channel: int | str
     log_level: str
 
     @classmethod
@@ -49,9 +49,23 @@ class Config:
             api_hash=_require("TELEGRAM_API_HASH"),
             phone=_require("TELEGRAM_PHONE"),
             session_name=os.getenv("TELEGRAM_SESSION_NAME", "teletrader"),
-            channel=_require("TELEGRAM_CHANNEL"),
+            channel=_parse_channel(_require("TELEGRAM_CHANNEL")),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
+
+
+def _parse_channel(value: str) -> int | str:
+    """Coerce a channel identifier to ``int`` when it is purely numeric.
+
+    Telethon resolves numeric chat ids reliably only as integers; a numeric
+    *string* is otherwise treated as a username. A leading ``-`` (e.g.
+    ``-1001524695283`` for channels/supergroups) is preserved. Non-numeric
+    values such as ``@safetrader90`` are returned unchanged.
+    """
+    candidate = value.strip()
+    if candidate.lstrip("-").isdigit():
+        return int(candidate)
+    return candidate
 
 
 def _require(name: str) -> str:
