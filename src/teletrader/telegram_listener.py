@@ -11,6 +11,7 @@ from telethon import TelegramClient, events
 
 from .config import Config
 from .logging_config import get_logger
+from .parser import parse_signal
 
 logger = get_logger(__name__)
 
@@ -52,16 +53,25 @@ class TelegramListener:
             self._handle_message(event)
 
     def _handle_message(self, event: events.NewMessage.Event) -> None:
-        """Print and log a received message. No parsing is performed."""
-        message = event.message
-        text = message.message or "<non-text message>"
+        """Parse a received message into a structured signal and report it.
 
-        # Console output for immediate visibility during development.
-        print(f"[{message.date:%Y-%m-%d %H:%M:%S}] {text}")
+        Non-signal messages (noise) are ignored. No trading is performed — this
+        only prints/logs the parsed result.
+        """
+        message = event.message
+        text = message.message or ""
 
         logger.info(
-            "Received message id=%s chat_id=%s: %s",
+            "Received message id=%s chat_id=%s",
             message.id,
             event.chat_id,
-            text,
         )
+
+        signal = parse_signal(text)
+        if signal is None:
+            # Noise / malformed — already logged by the parser.
+            print(f"[{message.date:%H:%M:%S}] (ignored) {text!r}")
+            return
+
+        # Console output for immediate visibility during development.
+        print(f"[{message.date:%H:%M:%S}] SIGNAL {signal}")
