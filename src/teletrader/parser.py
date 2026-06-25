@@ -67,6 +67,23 @@ class Signal:
     target_open_ended: bool
     raw_text: str
 
+    def __str__(self) -> str:
+        """Compact, human-readable one-liner for console/log output.
+
+        e.g. ``BUY NIFTY 23900 PE @165 SL 150 TGT 200+``.
+        """
+        plus = "+" if self.target_open_ended else ""
+        return (
+            f"{self.action.value} {self.underlying} {self.strike} "
+            f"{self.option_type.value} @{_fmt(self.entry_price)} "
+            f"SL {_fmt(self.stop_loss)} TGT {_fmt(self.target)}{plus}"
+        )
+
+
+def _fmt(value: float) -> str:
+    """Render a price without a trailing ``.0`` (165.0 -> "165", 165.5 -> "165.5")."""
+    return str(int(value)) if value.is_integer() else str(value)
+
 
 # --- Regexes for the three content lines --------------------------------------
 # A bare number with an optional decimal part.
@@ -117,17 +134,7 @@ def parse_signal(message: str | None) -> Signal | None:
         target_open_ended=bool(tgt_match.group("open")),
         raw_text=message,
     )
-    logger.info(
-        "Parsed signal: %s %s %d %s entry=%s sl=%s tgt=%s%s",
-        signal.action.value,
-        signal.underlying,
-        signal.strike,
-        signal.option_type.value,
-        signal.entry_price,
-        signal.stop_loss,
-        signal.target,
-        "+" if signal.target_open_ended else "",
-    )
+    logger.info("Parsed signal: %s", signal)
     return signal
 
 

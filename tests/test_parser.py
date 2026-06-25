@@ -108,3 +108,20 @@ def test_rejects_noise_and_malformed(raw: str) -> None:
 
 def test_none_input_is_rejected() -> None:
     assert parse_signal(None) is None
+
+
+# --- Compact string formatting -----------------------------------------------
+
+def test_str_is_compact_and_drops_trailing_zero() -> None:
+    signal = parse_signal("NIFTY 23900 PE ABOVE 165\n\nSL-150\n\nTGT-200+")
+    assert str(signal) == "BUY NIFTY 23900 PE @165 SL 150 TGT 200+"
+
+
+def test_str_without_open_ended_target_has_no_plus() -> None:
+    signal = parse_signal("NIFTY 23900 PE ABOVE 165\n\nSL-150\n\nTGT-200")
+    assert str(signal) == "BUY NIFTY 23900 PE @165 SL 150 TGT 200"
+
+
+def test_str_keeps_decimals() -> None:
+    signal = parse_signal("BANKNIFTY 56600 CE ABOVE 260.5\n\nSL-220\n\nTGT-340.25+")
+    assert str(signal) == "BUY BANKNIFTY 56600 CE @260.5 SL 220 TGT 340.25+"
