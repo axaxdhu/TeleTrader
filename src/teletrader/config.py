@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from .database import DEFAULT_DB_PATH
+
 
 class ConfigError(RuntimeError):
     """Raised when required configuration is missing or invalid."""
@@ -26,6 +28,7 @@ class Config:
     session_name: str
     channel: int | str
     log_level: str
+    database_path: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -51,6 +54,7 @@ class Config:
             session_name=os.getenv("TELEGRAM_SESSION_NAME", "teletrader"),
             channel=_parse_channel(_require("TELEGRAM_CHANNEL")),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            database_path=os.getenv("DATABASE_PATH", DEFAULT_DB_PATH),
         )
 
 

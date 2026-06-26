@@ -1,8 +1,8 @@
 """Telegram listener.
 
 Connects to Telegram via Telethon, subscribes to new messages from a single
-configured channel, and prints + logs each message. Deliberately does no
-parsing, trading, or persistence (Phase 1 scope).
+configured channel, parses each into a structured signal, and persists new
+signals to SQLite (rejecting duplicates). Still does no trading (Phase 3 scope).
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from telethon import TelegramClient, events
 from .config import Config
 from .logging_config import get_logger
 from .parser import parse_signal
+from .repository import DuplicateSignalError, SignalRepository
 
 logger = get_logger(__name__)
 
@@ -19,8 +20,9 @@ logger = get_logger(__name__)
 class TelegramListener:
     """Listens for new messages on a configured Telegram channel."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, repository: SignalRepository) -> None:
         self._config = config
+        self._repository = repository
         self._client = TelegramClient(
             config.session_name,
             config.api_id,
@@ -55,8 +57,9 @@ class TelegramListener:
     def _handle_message(self, event: events.NewMessage.Event) -> None:
         """Parse a received message into a structured signal and report it.
 
-        Non-signal messages (noise) are ignored. No trading is performed — this
-        only prints/logs the parsed result.
+        Non-signal messages (noise) are ignored. Parsed signals are persisted;
+        duplicates (same content hash) are recognised and skipped. No trading is
+        performed — this only parses, stores, and prints the result.
         """
         message = event.message
         text = message.message or ""
@@ -73,5 +76,11 @@ class TelegramListener:
             print(f"[{message.date:%H:%M:%S}] (ignored) {text!r}")
             return
 
+        try:
+            stored = self._repository.add(signal)
+        except DuplicateSignalError:
+            print(f"[{message.date:%H:%M:%S}] (duplicate) {signal}")
+            return
+
         # Console output for immediate visibility during development.
-        print(f"[{message.date:%H:%M:%S}] SIGNAL {signal}")
+        print(f"[{message.date:%H:%M:%S}] SIGNAL #{stored.id} {signal}")
