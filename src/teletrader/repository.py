@@ -91,15 +91,19 @@ class SignalRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
-    def add(self, signal: Signal) -> StoredSignal:
+    def add(self, signal: Signal, *, created_at: datetime | None = None) -> StoredSignal:
         """Persist ``signal`` and return the :class:`StoredSignal` row.
 
         Raises :class:`DuplicateSignalError` if a signal with the same content
         hash is already stored — the row is left untouched. This is the
         "reject duplicate signals" behaviour.
+
+        ``created_at`` (tz-aware UTC) may be supplied to control the stored
+        timestamp; it defaults to now. Injecting it keeps time deterministic in
+        tests and lets callers backfill rows.
         """
         message_hash = signal_hash(signal)
-        created_at = datetime.now(timezone.utc)
+        created_at = created_at or datetime.now(timezone.utc)
         try:
             with self._connection:
                 cursor = self._connection.execute(
@@ -165,6 +169,20 @@ class SignalRepository:
         return int(
             self._connection.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
         )
+
+    def count_since(self, moment: datetime) -> int:
+        """Return how many signals were stored at or after ``moment``.
+
+        ``moment`` is normalised to UTC to match the stored ISO-8601 UTC
+        ``created_at`` strings (which compare lexicographically). Used by the
+        trade engine's daily-trade-limit rule.
+        """
+        boundary = moment.astimezone(timezone.utc).isoformat()
+        row = self._connection.execute(
+            "SELECT COUNT(*) FROM signals WHERE created_at >= ?",
+            (boundary,),
+        ).fetchone()
+        return int(row[0])
 
 
 def _row_to_stored(row: sqlite3.Row) -> StoredSignal:

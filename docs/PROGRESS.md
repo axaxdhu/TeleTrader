@@ -9,10 +9,13 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | 1     | Telegram listener only       | ✅ Done & verified |
 | 2     | Signal parser                | ✅ Done (31 tests) |
 | 3     | Database storage             | ✅ Done (17 tests) |
+| —     | Trade engine (decision layer)| ✅ Done (13 tests) |
 | 4     | Paper trading                | ⏳ Not started     |
 | 5     | Live broker integration      | ⏳ Not started     |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
+> The trade engine is the broker-agnostic business-logic layer (it *decides*,
+> it does not *trade*); it precedes — and feeds — the Phase 4 broker adapter.
 
 ## Phase 1 notes (completed 2026-06-24)
 
@@ -128,6 +131,43 @@ tests/
   test_repository.py            # NEW — 17
 ```
 
+## Trade engine notes (completed 2026-06-26)
+
+Broker-agnostic **business-logic layer**: `Signal → TradeEngine → TradeDecision`.
+It decides *whether* a signal should be traded. It does **not** talk to any
+broker, place orders, or know about Zerodha/FYERS (kept strictly to the brief).
+
+- `src/teletrader/trade_engine.py`
+  - `TradeDecision` (frozen dataclass): `execute: bool`, `quantity: int`,
+    `reason: str`. `quantity` is `0` on every rejection.
+  - `TradeEngine.evaluate(Signal | None) -> TradeDecision`. Dependencies
+    injected: `Config`, `SignalRepository`, optional `rules` tuple, optional
+    `clock` (DI for deterministic tests). No globals, no broker.
+  - `TradeRule` (runtime-checkable `Protocol`): `name` +
+    `check(signal, context) -> str | None` (rejection reason, or `None` to
+    allow). Concrete rules, checked in order, first rejection wins:
+    `SignalValidityRule` → `AutoTradingRule` → `TradingHoursRule` →
+    `DuplicateRule` → `MaxTradesPerDayRule`. A `None` signal → "Malformed".
+  - `EvaluationContext` gathers I/O-derived facts once (now, `trades_today`,
+    `is_duplicate`) so each rule stays a pure function — easy to test.
+  - Quantity on acceptance comes from `TRADE_QUANTITY` (config-driven).
+- **Config-driven** (all new env vars, safe defaults; `AUTO_TRADING` defaults
+  **off**): `AUTO_TRADING`, `ALLOW_DUPLICATES`, `MAX_TRADES_PER_DAY`,
+  `TRADE_QUANTITY`, `MARKET_OPEN_TIME`, `MARKET_CLOSE_TIME`, `MARKET_TIMEZONE`
+  (validated IANA tz). New `Config` fields + `_parse_bool/_parse_int/_parse_time/
+  _parse_timezone` helpers.
+- **Repository additions** (additive, backward-compatible): `count_since(moment)`
+  (daily-limit rule) and an optional keyword `created_at` on `add()` (so tests —
+  and future backfills — can control the stored timestamp).
+- **Not wired into the listener.** The engine is a standalone, fully-tested
+  decision layer; consuming its `TradeDecision` to actually place/paper-trade is
+  Phase 4 (per `CLAUDE.md`, future phases aren't implemented unless requested).
+- Tests: `tests/test_trade_engine.py` (13) cover valid signal, malformed
+  signal, invalid prices, auto-trading disabled, duplicate (+ allow-duplicates),
+  market closed (pre-open and weekend), daily-limit exceeded, yesterday's trades
+  not counted, config-driven quantity, and injectable rule sets. Total suite now
+  **61 passing** (`uv run pytest`).
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -168,7 +208,7 @@ tests/
 
 1. Point me at this file: "read docs/PROGRESS.md" (it is NOT auto-loaded).
 2. `uv sync` if the venv is missing, then `uv run python main.py` to run.
-3. `uv run pytest` to confirm the 31 tests pass.
+3. `uv run pytest` to confirm the 61 tests pass.
 4. Outstanding housekeeping: optionally set a real `TELEGRAM_CHANNEL` (currently
    `me`); no git remote configured yet.
 

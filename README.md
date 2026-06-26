@@ -1,10 +1,15 @@
 # Telegram Trader
 
 Listens to Telegram trading signals and (in later phases) places trades through a
-broker API. This milestone implements **Phase 1 only**: connect to Telegram,
-listen for new messages from a configured channel, and print + log them.
+broker API. Implemented so far: connect to Telegram and listen for new messages
+(Phase 1), deterministically parse them into structured signals (Phase 2),
+persist them to SQLite with duplicate rejection (Phase 3), and run each signal
+through a broker-agnostic **trade engine** that decides whether it should be
+traded.
 
-No parsing, no broker integration, no database.
+The trade engine is the business-logic layer only — it never talks to a broker
+and never places orders. Broker integration (paper trading, then live Zerodha /
+FYERS) lands in Phases 4–5.
 
 ## Project structure
 
@@ -20,6 +25,10 @@ TeleTrader/
         ├── __init__.py
         ├── config.py            # Env-var configuration (dataclass)
         ├── logging_config.py    # Structured logging setup
+        ├── parser.py            # Deterministic regex signal parser
+        ├── database.py          # SQLite connection + migrations
+        ├── repository.py        # Signal persistence + dedupe
+        ├── trade_engine.py      # Business-logic decision layer (no broker)
         └── telegram_listener.py # Telethon listener
 ```
 
@@ -40,6 +49,14 @@ Copy `.env.example` to `.env` and fill in the values:
 | `TELEGRAM_CHANNEL`       | yes      | Channel to listen to (`@username` or numeric chat id)    |
 | `TELEGRAM_SESSION_NAME`  | no       | Session file name (default `teletrader`)                 |
 | `LOG_LEVEL`              | no       | `DEBUG`/`INFO`/`WARNING`/`ERROR` (default `INFO`)         |
+| `DATABASE_PATH`          | no       | SQLite file for stored signals (default `teletrader.db`) |
+| `AUTO_TRADING`           | no       | Master go/no-go for the trade engine (default `false`)   |
+| `ALLOW_DUPLICATES`       | no       | Let the engine act on repeated signals (default `false`) |
+| `MAX_TRADES_PER_DAY`     | no       | Daily cap the engine enforces (default `10`)             |
+| `TRADE_QUANTITY`         | no       | Quantity per accepted signal (default `15`)              |
+| `MARKET_OPEN_TIME`       | no       | Trading-hours start, `HH:MM` (default `09:15`)           |
+| `MARKET_CLOSE_TIME`      | no       | Trading-hours end, `HH:MM` (default `15:30`)             |
+| `MARKET_TIMEZONE`        | no       | IANA tz for trading hours (default `Asia/Kolkata`)       |
 
 ## Installation
 
