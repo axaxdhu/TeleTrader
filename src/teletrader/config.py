@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -39,7 +40,8 @@ class Config:
     auto_trading: bool
     allow_duplicates: bool
     max_trades_per_day: int
-    trade_quantity: int
+    trade_lots: int
+    lot_sizes: Mapping[str, int]
     market_open: time
     market_close: time
     market_timezone: str
@@ -72,7 +74,8 @@ class Config:
             auto_trading=_parse_bool("AUTO_TRADING", default=False),
             allow_duplicates=_parse_bool("ALLOW_DUPLICATES", default=False),
             max_trades_per_day=_parse_int("MAX_TRADES_PER_DAY", default=10),
-            trade_quantity=_parse_int("TRADE_QUANTITY", default=15),
+            trade_lots=_parse_int("TRADE_LOTS", default=1),
+            lot_sizes=_parse_lot_sizes("LOT_SIZES"),
             market_open=_parse_time("MARKET_OPEN_TIME", default="09:15"),
             market_close=_parse_time("MARKET_CLOSE_TIME", default="15:30"),
             market_timezone=_parse_timezone("MARKET_TIMEZONE", default="Asia/Kolkata"),
@@ -123,6 +126,31 @@ def _parse_int(name: str, *, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def _parse_lot_sizes(name: str) -> Mapping[str, int]:
+    """Parse ``SYM:size,SYM:size`` (e.g. ``NIFTY:65,BANKNIFTY:30``) into a map.
+
+    Empty/unset yields an empty map; the trade engine then rejects any signal
+    whose underlying has no configured lot size (fail-closed) rather than
+    guessing a size. Lot sizes are exchange-defined and revised periodically —
+    set them to the current values. See :mod:`teletrader.lot_size` for the
+    future broker-backed source.
+    """
+    raw = os.getenv(name, "")
+    sizes: dict[str, int] = {}
+    for part in raw.split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        symbol, sep, size = entry.partition(":")
+        if not sep or not symbol.strip():
+            raise ConfigError(f"{name} must be 'SYM:size,SYM:size', got {raw!r}")
+        try:
+            sizes[symbol.strip().upper()] = int(size)
+        except ValueError as exc:
+            raise ConfigError(f"{name} must be 'SYM:size,SYM:size', got {raw!r}") from exc
+    return sizes
 
 
 def _parse_time(name: str, *, default: str) -> time:

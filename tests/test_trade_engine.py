@@ -51,7 +51,8 @@ def _config(**overrides: object) -> Config:
         auto_trading=True,
         allow_duplicates=False,
         max_trades_per_day=100,
-        trade_quantity=15,
+        trade_lots=1,
+        lot_sizes={"NIFTY": 65, "BANKNIFTY": 30},
         market_open=time(9, 15),
         market_close=time(15, 30),
         market_timezone="Asia/Kolkata",
@@ -88,16 +89,31 @@ def _engine(
 # --- Valid signal -------------------------------------------------------------
 
 def test_valid_signal_is_accepted(repo: SignalRepository) -> None:
+    # 1 lot of NIFTY (lot size 65) -> quantity 65.
     decision = _engine(repo).evaluate(_signal())
     assert decision.execute is True
-    assert decision.quantity == 15
+    assert decision.quantity == 65
     assert decision.reason == "Signal accepted"
 
 
-def test_accepted_quantity_comes_from_config(repo: SignalRepository) -> None:
-    decision = _engine(repo, _config(trade_quantity=50)).evaluate(_signal())
+def test_quantity_is_lots_times_lot_size(repo: SignalRepository) -> None:
+    decision = _engine(repo, _config(trade_lots=3)).evaluate(_signal())
     assert decision.execute is True
-    assert decision.quantity == 50
+    assert decision.quantity == 195  # 3 x 65
+
+
+def test_lot_size_is_per_underlying(repo: SignalRepository) -> None:
+    # BANKNIFTY has a different lot size (30) than NIFTY (65).
+    decision = _engine(repo).evaluate(_signal(underlying="BANKNIFTY"))
+    assert decision.execute is True
+    assert decision.quantity == 30
+
+
+def test_missing_lot_size_is_rejected(repo: SignalRepository) -> None:
+    config = _config(lot_sizes={"NIFTY": 65})  # BANKNIFTY absent
+    decision = _engine(repo, config).evaluate(_signal(underlying="BANKNIFTY"))
+    assert decision.execute is False
+    assert decision.reason == "No lot size configured for BANKNIFTY"
 
 
 # --- Malformed signal ---------------------------------------------------------

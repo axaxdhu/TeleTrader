@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from .config import Config
 from .logging_config import get_logger
+from .lot_size import ConfigLotSizeProvider, LotSizeProvider
 from .parser import Signal
 from .repository import SignalRepository
 
@@ -62,6 +63,7 @@ class EvaluationContext:
     now: datetime
     trades_today: int
     is_duplicate: bool
+    lot_size: int | None
 
 
 @runtime_checkable
@@ -150,6 +152,22 @@ class MaxTradesPerDayRule:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class LotSizeRule:
+    """Block a signal whose underlying has no known lot size (can't be sized).
+
+    Checked last, so it only fires for an otherwise-acceptable signal — i.e.
+    when we actually need a lot size to compute the order quantity.
+    """
+
+    name: str = "lot_size"
+
+    def check(self, signal: Signal, context: EvaluationContext) -> str | None:
+        if context.lot_size is None:
+            return f"No lot size configured for {signal.underlying}"
+        return None
+
+
 # --- Engine -------------------------------------------------------------------
 
 
@@ -166,11 +184,15 @@ class TradeEngine:
         config: Config,
         repository: SignalRepository,
         *,
+        lot_size_provider: LotSizeProvider | None = None,
         rules: tuple[TradeRule, ...] | None = None,
         clock: Clock | None = None,
     ) -> None:
         self._config = config
         self._repository = repository
+        # Config-backed by default; inject a BrokerLotSizeProvider here once the
+        # broker is wired in (Phase 5) — see teletrader.lot_size for the seam.
+        self._lot_sizes = lot_size_provider or ConfigLotSizeProvider(config.lot_sizes)
         self._clock = clock or self._default_clock
         self._rules = rules if rules is not None else self._build_rules()
 
@@ -190,7 +212,7 @@ class TradeEngine:
             if reason is not None:
                 logger.info("Signal rejected by %s rule: %s", rule.name, reason)
                 return self._reject(reason)
-        return self._accept(signal)
+        return self._accept(signal, context)
 
     def _build_rules(self) -> tuple[TradeRule, ...]:
         """Assemble the default, config-driven rule set (evaluation order)."""
@@ -200,6 +222,7 @@ class TradeEngine:
             TradingHoursRule(self._config),
             DuplicateRule(self._config),
             MaxTradesPerDayRule(self._config),
+            LotSizeRule(),
         )
 
     def _build_context(self, signal: Signal) -> EvaluationContext:
@@ -210,15 +233,22 @@ class TradeEngine:
             now=now,
             trades_today=self._repository.count_since(start_of_day),
             is_duplicate=self._repository.exists(signal),
+            lot_size=self._lot_sizes.lot_size_for(signal.underlying),
         )
 
-    def _accept(self, signal: Signal) -> TradeDecision:
-        decision = TradeDecision(
-            execute=True,
-            quantity=self._config.trade_quantity,
-            reason="Signal accepted",
+    def _accept(self, signal: Signal, context: EvaluationContext) -> TradeDecision:
+        # LotSizeRule has already guaranteed a known lot size by this point.
+        lot_size = context.lot_size
+        assert lot_size is not None  # narrows type; enforced by LotSizeRule
+        quantity = self._config.trade_lots * lot_size
+        decision = TradeDecision(execute=True, quantity=quantity, reason="Signal accepted")
+        logger.info(
+            "Signal accepted: %s (%s lot(s) x %s = quantity %s)",
+            signal,
+            self._config.trade_lots,
+            lot_size,
+            quantity,
         )
-        logger.info("Signal accepted: %s (quantity=%s)", signal, decision.quantity)
         return decision
 
     def _reject(self, reason: str) -> TradeDecision:

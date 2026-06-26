@@ -9,7 +9,7 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | 1     | Telegram listener only       | ✅ Done & verified |
 | 2     | Signal parser                | ✅ Done (31 tests) |
 | 3     | Database storage             | ✅ Done (17 tests) |
-| —     | Trade engine (decision layer)| ✅ Done (13 tests) |
+| —     | Trade engine (decision layer)| ✅ Done (15 tests) |
 | 4     | Paper trading                | ⏳ Not started     |
 | 5     | Live broker integration      | ⏳ Not started     |
 
@@ -147,26 +147,39 @@ broker, place orders, or know about Zerodha/FYERS (kept strictly to the brief).
     `check(signal, context) -> str | None` (rejection reason, or `None` to
     allow). Concrete rules, checked in order, first rejection wins:
     `SignalValidityRule` → `AutoTradingRule` → `TradingHoursRule` →
-    `DuplicateRule` → `MaxTradesPerDayRule`. A `None` signal → "Malformed".
+    `DuplicateRule` → `MaxTradesPerDayRule` → `LotSizeRule`. A `None` signal →
+    "Malformed".
   - `EvaluationContext` gathers I/O-derived facts once (now, `trades_today`,
-    `is_duplicate`) so each rule stays a pure function — easy to test.
-  - Quantity on acceptance comes from `TRADE_QUANTITY` (config-driven).
+    `is_duplicate`, `lot_size`) so each rule stays a pure function — easy to test.
+  - **Lot sizing:** options trade in lots, so `quantity = TRADE_LOTS × lot_size`
+    (the unit count a broker order wants). Lot size is resolved per underlying
+    via a `LotSizeProvider` seam (see below), so NIFTY and BANKNIFTY size
+    differently and a missing lot size is a clean rejection ("No lot size
+    configured for X"), never a guess.
+- **`LotSizeProvider` seam** (`src/teletrader/lot_size.py`): `LotSizeProvider`
+  Protocol + `ConfigLotSizeProvider` (serves sizes from `.env`). Injected into
+  the engine (defaults to config-backed). **Phase 5 hook:** a
+  `BrokerLotSizeProvider` reading the broker instrument master (Kite
+  `instruments("NFO")` `lot_size`, or FYERS symbol master) drops in with the
+  same interface — no engine change. Documented inline in `lot_size.py`.
 - **Config-driven** (all new env vars, safe defaults; `AUTO_TRADING` defaults
   **off**): `AUTO_TRADING`, `ALLOW_DUPLICATES`, `MAX_TRADES_PER_DAY`,
-  `TRADE_QUANTITY`, `MARKET_OPEN_TIME`, `MARKET_CLOSE_TIME`, `MARKET_TIMEZONE`
+  `TRADE_LOTS`, `LOT_SIZES` (e.g. `NIFTY:65,BANKNIFTY:30`; empty default →
+  fail-closed), `MARKET_OPEN_TIME`, `MARKET_CLOSE_TIME`, `MARKET_TIMEZONE`
   (validated IANA tz). New `Config` fields + `_parse_bool/_parse_int/_parse_time/
-  _parse_timezone` helpers.
+  _parse_timezone/_parse_lot_sizes` helpers.
 - **Repository additions** (additive, backward-compatible): `count_since(moment)`
   (daily-limit rule) and an optional keyword `created_at` on `add()` (so tests —
   and future backfills — can control the stored timestamp).
 - **Not wired into the listener.** The engine is a standalone, fully-tested
   decision layer; consuming its `TradeDecision` to actually place/paper-trade is
   Phase 4 (per `CLAUDE.md`, future phases aren't implemented unless requested).
-- Tests: `tests/test_trade_engine.py` (13) cover valid signal, malformed
+- Tests: `tests/test_trade_engine.py` (15) cover valid signal, malformed
   signal, invalid prices, auto-trading disabled, duplicate (+ allow-duplicates),
   market closed (pre-open and weekend), daily-limit exceeded, yesterday's trades
-  not counted, config-driven quantity, and injectable rule sets. Total suite now
-  **61 passing** (`uv run pytest`).
+  not counted, lot sizing (lots × lot size, per-underlying NIFTY vs BANKNIFTY,
+  missing-lot-size rejection), and injectable rule sets. Total suite now
+  **63 passing** (`uv run pytest`).
 
 ## Git state
 
@@ -208,7 +221,7 @@ broker, place orders, or know about Zerodha/FYERS (kept strictly to the brief).
 
 1. Point me at this file: "read docs/PROGRESS.md" (it is NOT auto-loaded).
 2. `uv sync` if the venv is missing, then `uv run python main.py` to run.
-3. `uv run pytest` to confirm the 61 tests pass.
+3. `uv run pytest` to confirm the 63 tests pass.
 4. Outstanding housekeeping: optionally set a real `TELEGRAM_CHANNEL` (currently
    `me`); no git remote configured yet.
 

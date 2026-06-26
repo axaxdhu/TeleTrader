@@ -66,8 +66,8 @@ Telegram message
 Decision layer (broker-agnostic, no order placement):
    TradeEngine.evaluate(Signal)         (trade_engine.py)  → TradeDecision
        → SignalValidityRule → AutoTradingRule → TradingHoursRule
-         → DuplicateRule → MaxTradesPerDayRule   (first rejection wins)
-   TradeDecision(execute, quantity, reason)
+         → DuplicateRule → MaxTradesPerDayRule → LotSizeRule  (first rejection wins)
+   TradeDecision(execute, quantity = lots × lot_size, reason)
        (the future broker adapter acts on this; Phases 1–3 ingestion is unchanged)
 ```
 
@@ -89,7 +89,8 @@ duplicate/daily-count facts.
 | `src/teletrader/parser.py` | Pure, deterministic signal parsing (regex only, **no AI/LLM**). `parse_signal(str) -> Signal \| None`. Defines the `Signal` dataclass and `Action`/`OptionType` enums. Applies the always-on target offset (`TARGET_PLUS_OFFSET`). No I/O. |
 | `src/teletrader/database.py` | Owns *where* data lives: `connect(path)` (tuned SQLite connection) and `initialize(conn)` (forward-only migrations keyed off `PRAGMA user_version`). Holds the SQL schema. No knowledge of `Signal`. |
 | `src/teletrader/repository.py` | Owns *what* is stored: `SignalRepository` (CRUD over the `signals` table), `StoredSignal`, `signal_hash()` (dedupe key), `DuplicateSignalError`. Maps `Signal` ↔ rows. The only module that issues SQL against `signals`. Also exposes `count_since()` for the engine's daily-limit rule. |
-| `src/teletrader/trade_engine.py` | **Business-logic / decision layer.** `TradeEngine.evaluate(Signal) -> TradeDecision`. Composes config-driven `TradeRule`s (validity, auto-trading toggle, trading hours, duplicate, daily limit). **Broker-agnostic: no Zerodha/FYERS, no order placement.** Knows nothing of how a decision is executed. |
+| `src/teletrader/trade_engine.py` | **Business-logic / decision layer.** `TradeEngine.evaluate(Signal) -> TradeDecision`. Composes config-driven `TradeRule`s (validity, auto-trading toggle, trading hours, duplicate, daily limit, lot size). Sizes the order as `lots × lot_size`. **Broker-agnostic: no Zerodha/FYERS, no order placement.** Knows nothing of how a decision is executed. |
+| `src/teletrader/lot_size.py` | The `LotSizeProvider` seam: resolves an underlying's exchange lot size. `ConfigLotSizeProvider` serves it from `.env` today; a `BrokerLotSizeProvider` (Phase 5) will read it from the broker instrument master — same interface, no engine change. |
 | `list_dialogs.py` | Standalone dev helper to list Telegram chats/ids for `.env` configuration. Not part of the runtime path. |
 | `tests/` | `test_parser.py`, `test_repository.py`, `test_trade_engine.py` — unit tests run with `uv run pytest`. |
 
@@ -103,11 +104,12 @@ its neighbours.
   directly.
   ```python
   Config(api_id, api_hash, phone, session_name, channel, log_level, database_path,
-         auto_trading, allow_duplicates, max_trades_per_day, trade_quantity,
-         market_open, market_close, market_timezone)
+         auto_trading, allow_duplicates, max_trades_per_day, trade_lots,
+         lot_sizes, market_open, market_close, market_timezone)
   ```
-  The last seven fields drive the trade engine; all come from env vars with safe
-  defaults (`AUTO_TRADING` defaults **off**).
+  The last eight fields drive the trade engine; all come from env vars with safe
+  defaults (`AUTO_TRADING` defaults **off**; `lot_sizes` defaults **empty**, so
+  an underlying with no configured lot size is rejected rather than mis-sized).
 
 - **parser → listener / repository**: the `Signal` dataclass is the lingua
   franca of the system.
@@ -141,17 +143,20 @@ its neighbours.
   downstream sees only plain `str` message text.
 
 - **trade engine → (future) broker adapter**: the decision contract. The engine
-  is constructed with injected `Config`, `SignalRepository`, an optional rule
-  set, and an optional clock (DI), and exposes a single pure decision method:
+  is constructed with injected `Config`, `SignalRepository`, and optional
+  `LotSizeProvider`, rule set, and clock (DI), and exposes a single pure decision
+  method:
   ```python
-  TradeEngine(config, repository, *, rules=None, clock=None)
+  TradeEngine(config, repository, *, lot_size_provider=None, rules=None, clock=None)
   .evaluate(signal: Signal | None) -> TradeDecision
-  TradeDecision(execute: bool, quantity: int, reason: str)
+  TradeDecision(execute: bool, quantity: int, reason: str)   # quantity = lots × lot_size
   ```
   A `TradeRule` is anything with a `name` and
   `check(signal, context) -> str | None` (a rejection reason, or `None` to
-  allow). The rule set is the extension point for future risk rules; the engine
-  itself contains no broker knowledge.
+  allow). The rule set is the extension point for future risk rules. A
+  `LotSizeProvider` is anything with `lot_size_for(underlying) -> int | None`;
+  it defaults to the config-backed provider. The engine itself contains no
+  broker knowledge.
 
 ### Persistence schema — `signals`
 
@@ -229,11 +234,21 @@ its neighbours.
     engine answers *should we trade this?* and nothing else: it returns a
     `TradeDecision` and never places an order or imports a broker SDK. Each
     policy (validity, auto-trading toggle, trading hours, duplicate, daily
-    limit) is an independent `TradeRule` checked in order; the first rejection
-    wins. Rules are config-driven and the rule set is injectable, so future risk
-    rules slot in without modifying the engine. I/O-derived facts (now,
-    today's count, duplicate?) are gathered once into an immutable
-    `EvaluationContext`, keeping each rule a pure, trivially testable function.
+    limit, lot size) is an independent `TradeRule` checked in order; the first
+    rejection wins. Rules are config-driven and the rule set is injectable, so
+    future risk rules slot in without modifying the engine. I/O-derived facts
+    (now, today's count, duplicate?, lot size) are gathered once into an
+    immutable `EvaluationContext`, keeping each rule a pure, trivially testable
+    function.
+
+12. **Lot sizing behind a provider seam** — options trade in *lots*, so the user
+    configures `TRADE_LOTS` and the engine emits `quantity = lots × lot_size`
+    (the unit count a broker order needs). Lot sizes are exchange-defined,
+    per-underlying, and revised periodically, so they are never hardcoded: they
+    come through a `LotSizeProvider` (`ConfigLotSizeProvider` from `.env` now).
+    A `BrokerLotSizeProvider` reading the broker instrument master can replace it
+    in Phase 5 without touching the engine. Missing lot size → clean rejection,
+    never a guessed size.
 
 ## Where future phases plug in
 
@@ -242,7 +257,8 @@ its neighbours.
   *parse → `repository.add()` → `TradeEngine.evaluate()` → (if `execute`)
   `BrokerAdapter.place(decision)`*. The engine is already built and decoupled;
   only the adapter and the listener wiring remain. Zerodha/FYERS sit behind the
-  one adapter interface.
+  one adapter interface. The same integration supplies a `BrokerLotSizeProvider`
+  (from the broker instrument master) to replace the config-backed lot sizes.
 - **More risk rules**: append `TradeRule`s (position sizing, per-underlying
   caps, exposure limits) to the engine's rule set — no engine changes needed.
 - **Notifications**: a thin sink subscribed to `TradeDecision` / stored-signal

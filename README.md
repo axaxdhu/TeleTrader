@@ -28,6 +28,7 @@ TeleTrader/
         ├── parser.py            # Deterministic regex signal parser
         ├── database.py          # SQLite connection + migrations
         ├── repository.py        # Signal persistence + dedupe
+        ├── lot_size.py          # LotSizeProvider (config now, broker later)
         ├── trade_engine.py      # Business-logic decision layer (no broker)
         └── telegram_listener.py # Telethon listener
 ```
@@ -53,7 +54,8 @@ Copy `.env.example` to `.env` and fill in the values:
 | `AUTO_TRADING`           | no       | Master go/no-go for the trade engine (default `false`)   |
 | `ALLOW_DUPLICATES`       | no       | Let the engine act on repeated signals (default `false`) |
 | `MAX_TRADES_PER_DAY`     | no       | Daily cap the engine enforces (default `10`)             |
-| `TRADE_QUANTITY`         | no       | Quantity per accepted signal (default `15`)              |
+| `TRADE_LOTS`             | no       | Lots per accepted signal; quantity = lots × lot size (default `1`) |
+| `LOT_SIZES`              | no       | Per-underlying lot size, e.g. `NIFTY:65,BANKNIFTY:30` (default empty → unsized underlyings rejected) |
 | `MARKET_OPEN_TIME`       | no       | Trading-hours start, `HH:MM` (default `09:15`)           |
 | `MARKET_CLOSE_TIME`      | no       | Trading-hours end, `HH:MM` (default `15:30`)             |
 | `MARKET_TIMEZONE`        | no       | IANA tz for trading hours (default `Asia/Kolkata`)       |
