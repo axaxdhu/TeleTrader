@@ -50,20 +50,25 @@ def test_parses_all_fields_correctly() -> None:
     )
 
 
-def test_open_ended_target_is_offset_below_signal_value() -> None:
-    """A trailing ``+`` stores the target TARGET_PLUS_OFFSET points below."""
-    signal = parse_signal("BANKNIFTY 51000 CE ABOVE 240\n\nSL-200\n\nTGT-320+")
-    assert signal is not None
-    assert signal.target == 320.0 - TARGET_PLUS_OFFSET
-    assert signal.target_open_ended is True  # flag retained for audit
+def test_target_is_always_offset_below_signal_value() -> None:
+    """The target is pulled in by TARGET_PLUS_OFFSET regardless of any ``+``."""
+    # Trailing ``+``
+    plus = parse_signal("BANKNIFTY 51000 CE ABOVE 240\n\nSL-200\n\nTGT-320+")
+    assert plus is not None
+    assert plus.target == 320.0 - TARGET_PLUS_OFFSET
+    assert plus.target_open_ended is True  # flag retained for audit
 
+    # No ``+`` -> still offset
+    plain = parse_signal("NIFTY 24250 PE ABOVE 130\n\nSL-115\n\nTGT-170")
+    assert plain is not None
+    assert plain.target == 170.0 - TARGET_PLUS_OFFSET
+    assert plain.target_open_ended is False
 
-def test_explicit_target_is_not_offset() -> None:
-    """No ``+`` -> target is taken verbatim, no offset applied."""
-    signal = parse_signal("NIFTY 24250 PE ABOVE 130\n\nSL-115\n\nTGT-170")
-    assert signal is not None
-    assert signal.target == 170.0
-    assert signal.target_open_ended is False
+    # Double ``++`` -> accepted, offset applied, flag set
+    dbl = parse_signal("NIFTY 24250 PE ABOVE 130\n\nSL-115\n\nTGT-170++")
+    assert dbl is not None
+    assert dbl.target == 170.0 - TARGET_PLUS_OFFSET
+    assert dbl.target_open_ended is True
 
 
 def test_call_option_and_banknifty() -> None:
@@ -78,7 +83,7 @@ def test_call_option_and_banknifty() -> None:
 def test_target_without_plus_is_not_open_ended() -> None:
     signal = parse_signal("NIFTY 24250 PE ABOVE 130\n\nSL-115\n\nTGT-170")
     assert signal is not None
-    assert signal.target == 170.0
+    assert signal.target == 170.0 - TARGET_PLUS_OFFSET  # offset still applied
     assert signal.target_open_ended is False
 
 
@@ -141,8 +146,9 @@ def test_str_is_compact_and_drops_trailing_zero() -> None:
 
 
 def test_str_without_open_ended_target_has_no_plus() -> None:
+    # 200 (no +) -> stored 198 (offset always applies), no trailing + in output.
     signal = parse_signal("NIFTY 23900 PE ABOVE 165\n\nSL-150\n\nTGT-200")
-    assert str(signal) == "BUY NIFTY 23900 PE @165 SL 150 TGT 200"
+    assert str(signal) == "BUY NIFTY 23900 PE @165 SL 150 TGT 198"
 
 
 def test_str_keeps_decimals() -> None:

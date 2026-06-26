@@ -50,15 +50,18 @@ terminal and logs.
   `tests/fixtures/sample_messages.md`. Run with `uv run pytest`.
 - pytest added as a dev dependency (`[dependency-groups] dev`).
 
-## Parser change — open-ended target offset (2026-06-26)
+## Parser change — target offset (2026-06-26)
 
-A trailing `+` on the target (e.g. `TGT-200+`) no longer stores the raw level.
-The stored `target` is now set `TARGET_PLUS_OFFSET` (= **2**) points *below* the
-signal value (`TGT-200+` → `target == 198`) so the exit fills before price
-stalls at the round number. The `target_open_ended` flag is **retained** (set
-`True`) purely for audit, so you can still see the original carried a `+`.
-Explicit targets (no `+`) are taken verbatim. `__str__` reflects the adjusted
-value, e.g. `... TGT 198+`. Covered by added tests; suite now **50 passing**.
+The stored `target` is **always** set `TARGET_PLUS_OFFSET` (= **2**) points
+*below* the level in the message — regardless of any trailing `+` — so the exit
+fills before price stalls at the round number (`TGT-200`, `TGT-200+`, `TGT-200++`
+all → `target == 198`). The target regex tolerates one or more `+`
+(`(?P<open>\++)?`). `target_open_ended` is now a pure **audit** flag recording
+whether a `+` was present; it no longer affects the number. `__str__` shows the
+adjusted value, e.g. `... TGT 198` / `... TGT 198+`. Suite **49 passing**.
+
+(Earlier iteration applied the offset only when a `+` was present; that was
+generalised to always-on at the user's request.)
 
 ## Phase 3 notes (completed 2026-06-26)
 

@@ -32,9 +32,9 @@ logger = get_logger(__name__)
 # Keep log lines from blowing up on accidental walls of text.
 _MAX_LOGGED_CHARS = 120
 
-# When a target carries a trailing ``+`` (open-ended, "200 and beyond"), we do
-# not aim for the exact level — the stored target is set this many points
-# *below* it so the exit fills before price stalls at the round number.
+# The stored target is always set this many points *below* the level in the
+# message (regardless of any trailing ``+``) so the exit fills before price
+# stalls at the round number.
 TARGET_PLUS_OFFSET = 2.0
 
 
@@ -57,13 +57,12 @@ class Signal:
     """A parsed, structured trading signal (index option).
 
     ``action`` is always :attr:`Action.BUY`: an ``ABOVE`` entry is a breakout
-    that is entered by *buying* the option. ``target_open_ended`` records that
-    the source message carried a trailing ``+`` on the target (e.g. ``TGT-200+``,
-    meaning "200 and beyond"). When it did, ``target`` is **not** the raw level
-    from the message: it is set :data:`TARGET_PLUS_OFFSET` points *below* it
-    (e.g. ``TGT-200+`` -> ``target == 198``) so the exit fills before price
-    stalls at the round number. ``target_open_ended`` is kept purely for audit —
-    it lets you see the original had a ``+`` after the adjustment is applied.
+    that is entered by *buying* the option. ``target`` is **always** set
+    :data:`TARGET_PLUS_OFFSET` points *below* the raw level in the message
+    (e.g. ``TGT-200`` or ``TGT-200+`` or ``TGT-200++`` -> ``target == 198``) so
+    the exit fills before price stalls at the round number. ``target_open_ended``
+    records, purely for audit, whether the source message carried a trailing
+    ``+`` (one or more) on the target — it no longer affects the numeric target.
     """
 
     underlying: str
@@ -107,7 +106,7 @@ _HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 _SL_RE = re.compile(rf"^SL\s*-\s*(?P<sl>{_NUM})$", re.IGNORECASE)
-_TGT_RE = re.compile(rf"^TGT\s*-\s*(?P<tgt>{_NUM})\s*(?P<open>\+?)$", re.IGNORECASE)
+_TGT_RE = re.compile(rf"^TGT\s*-\s*(?P<tgt>{_NUM})\s*(?P<open>\++)?$", re.IGNORECASE)
 
 
 def parse_signal(message: str | None) -> Signal | None:
@@ -132,11 +131,11 @@ def parse_signal(message: str | None) -> Signal | None:
     if not (header_match and sl_match and tgt_match):
         return _reject(message, "does not match signal format")
 
-    # An open-ended (``+``) target is pulled in by TARGET_PLUS_OFFSET points;
-    # an explicit target is taken verbatim. See TARGET_PLUS_OFFSET above.
+    # The target is always pulled in by TARGET_PLUS_OFFSET points, regardless of
+    # any trailing ``+``/``++`` (which is recorded only for audit). See above.
     open_ended = bool(tgt_match.group("open"))
     raw_target = float(tgt_match.group("tgt"))
-    target = raw_target - TARGET_PLUS_OFFSET if open_ended else raw_target
+    target = raw_target - TARGET_PLUS_OFFSET
 
     signal = Signal(
         underlying=header_match.group("underlying").upper(),
