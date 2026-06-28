@@ -134,6 +134,32 @@ def test_same_content_different_whitespace_is_duplicate(repo: SignalRepository) 
         repo.add(b)
 
 
+def test_same_signal_same_day_is_rejected(repo: SignalRepository) -> None:
+    day = datetime(2026, 6, 26, 10, 0, tzinfo=timezone.utc)
+    repo.add(_signal(), created_at=day)
+    with pytest.raises(DuplicateSignalError):
+        repo.add(_signal(), created_at=day.replace(hour=14))  # later, same day
+    assert repo.count() == 1
+
+
+def test_same_signal_different_day_is_accepted(repo: SignalRepository) -> None:
+    day1 = datetime(2026, 6, 26, 10, 0, tzinfo=timezone.utc)
+    day2 = datetime(2026, 6, 29, 10, 0, tzinfo=timezone.utc)
+    first = repo.add(_signal(), created_at=day1)
+    second = repo.add(_signal(), created_at=day2)  # same content, next day
+    assert repo.count() == 2
+    assert first.id != second.id
+
+
+def test_exists_is_day_scoped(repo: SignalRepository) -> None:
+    from datetime import date
+
+    day1 = datetime(2026, 6, 26, 10, 0, tzinfo=timezone.utc)
+    repo.add(_signal(), created_at=day1)
+    assert repo.exists(_signal(), on_date=date(2026, 6, 26)) is True
+    assert repo.exists(_signal(), on_date=date(2026, 6, 27)) is False
+
+
 def test_different_signals_are_not_duplicates(repo: SignalRepository) -> None:
     repo.add(_signal())
     repo.add(_signal(strike=24000))           # different strike

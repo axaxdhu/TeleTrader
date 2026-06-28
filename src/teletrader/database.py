@@ -46,6 +46,78 @@ _MIGRATIONS: tuple[str, ...] = (
         created_at        TEXT    NOT NULL
     );
     """,
+    # v2 — paper-trading orders (simulated broker, Phase 4).
+    """
+    CREATE TABLE paper_orders (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id         TEXT    NOT NULL UNIQUE,
+        symbol           TEXT    NOT NULL,
+        exchange         TEXT    NOT NULL,
+        transaction_type TEXT    NOT NULL,
+        quantity         INTEGER NOT NULL,
+        order_type       TEXT    NOT NULL,
+        product          TEXT    NOT NULL,
+        price            REAL,
+        trigger_price    REAL,
+        status           TEXT    NOT NULL,
+        filled_quantity  INTEGER NOT NULL DEFAULT 0,
+        average_price    REAL,
+        brokerage        REAL    NOT NULL DEFAULT 0,
+        tag              TEXT,
+        message          TEXT,
+        created_at       TEXT    NOT NULL,
+        updated_at       TEXT    NOT NULL
+    );
+    """,
+    # v3 — paper-trading positions (one net row per instrument/product).
+    """
+    CREATE TABLE paper_positions (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol        TEXT    NOT NULL,
+        exchange      TEXT    NOT NULL,
+        product       TEXT    NOT NULL,
+        quantity      INTEGER NOT NULL,
+        average_price REAL    NOT NULL,
+        last_price    REAL    NOT NULL,
+        realized_pnl  REAL    NOT NULL DEFAULT 0,
+        updated_at    TEXT    NOT NULL,
+        UNIQUE(symbol, exchange, product)
+    );
+    """,
+    # v4 — make signal dedupe per-day: add trade_date and key uniqueness on
+    # (message_hash, trade_date) so the same signal is a duplicate only within
+    # the same trading day, and is accepted again on a later day. SQLite cannot
+    # drop the old table-level UNIQUE(message_hash), so the table is rebuilt;
+    # existing rows backfill trade_date from the date part of created_at.
+    """
+    CREATE TABLE signals_v4 (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_hash      TEXT    NOT NULL,
+        underlying        TEXT    NOT NULL,
+        strike            INTEGER NOT NULL,
+        option_type       TEXT    NOT NULL,
+        action            TEXT    NOT NULL,
+        entry_price       REAL    NOT NULL,
+        stop_loss         REAL    NOT NULL,
+        target            REAL    NOT NULL,
+        target_open_ended INTEGER NOT NULL,
+        raw_text          TEXT    NOT NULL,
+        created_at        TEXT    NOT NULL,
+        trade_date        TEXT    NOT NULL,
+        UNIQUE(message_hash, trade_date)
+    );
+    INSERT INTO signals_v4 (
+        id, message_hash, underlying, strike, option_type, action,
+        entry_price, stop_loss, target, target_open_ended, raw_text,
+        created_at, trade_date
+    )
+    SELECT id, message_hash, underlying, strike, option_type, action,
+           entry_price, stop_loss, target, target_open_ended, raw_text,
+           created_at, substr(created_at, 1, 10)
+      FROM signals;
+    DROP TABLE signals;
+    ALTER TABLE signals_v4 RENAME TO signals;
+    """,
 )
 
 #: The schema version this build expects. Equals the number of migrations.

@@ -232,7 +232,9 @@ class TradeEngine:
         return EvaluationContext(
             now=now,
             trades_today=self._repository.count_since(start_of_day),
-            is_duplicate=self._repository.exists(signal),
+            # Duplicate detection is per-day: a signal already seen *today* is a
+            # duplicate; the same signal on a later day is allowed.
+            is_duplicate=self._repository.exists(signal, on_date=now.date()),
             lot_size=self._lot_sizes.lot_size_for(signal.underlying),
         )
 

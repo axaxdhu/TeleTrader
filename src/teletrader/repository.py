@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone, tzinfo
 
 from .logging_config import get_logger
 from .parser import Action, OptionType, Signal
@@ -86,24 +86,34 @@ class SignalRepository:
     The repository does not own the connection's lifecycle — it is injected
     (dependency injection), so tests can pass an in-memory connection and the
     application can share one connection across components.
+
+    Duplicate detection is **per trading day**: the same signal is a duplicate
+    only if already stored on the same date, and is accepted again on a later
+    day. The day is derived in ``tz`` (inject the market timezone so "day" means
+    the trading day, not a UTC day); it defaults to UTC.
     """
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self, connection: sqlite3.Connection, *, tz: tzinfo = timezone.utc
+    ) -> None:
         self._connection = connection
+        self._tz = tz
 
     def add(self, signal: Signal, *, created_at: datetime | None = None) -> StoredSignal:
         """Persist ``signal`` and return the :class:`StoredSignal` row.
 
-        Raises :class:`DuplicateSignalError` if a signal with the same content
-        hash is already stored — the row is left untouched. This is the
-        "reject duplicate signals" behaviour.
+        Raises :class:`DuplicateSignalError` if the same signal was already
+        stored **on the same trading day** — the existing row is left untouched.
+        The same signal on a different day is accepted (a fresh trade).
 
-        ``created_at`` (tz-aware UTC) may be supplied to control the stored
-        timestamp; it defaults to now. Injecting it keeps time deterministic in
-        tests and lets callers backfill rows.
+        ``created_at`` (tz-aware) may be supplied to control the stored
+        timestamp; it defaults to now (UTC). The trading day is ``created_at``
+        as seen in the repository's ``tz``. Injecting ``created_at`` keeps time
+        deterministic in tests and lets callers backfill rows.
         """
         message_hash = signal_hash(signal)
         created_at = created_at or datetime.now(timezone.utc)
+        trade_date = created_at.astimezone(self._tz).date().isoformat()
         try:
             with self._connection:
                 cursor = self._connection.execute(
@@ -111,8 +121,8 @@ class SignalRepository:
                     INSERT INTO signals (
                         message_hash, underlying, strike, option_type, action,
                         entry_price, stop_loss, target, target_open_ended,
-                        raw_text, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        raw_text, created_at, trade_date
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         message_hash,
@@ -126,11 +136,14 @@ class SignalRepository:
                         int(signal.target_open_ended),
                         signal.raw_text,
                         created_at.isoformat(),
+                        trade_date,
                     ),
                 )
         except sqlite3.IntegrityError as exc:
-            # The UNIQUE(message_hash) constraint is the duplicate guard.
-            logger.info("Rejected duplicate signal (hash=%s)", message_hash)
+            # UNIQUE(message_hash, trade_date) is the per-day duplicate guard.
+            logger.info(
+                "Rejected duplicate signal (hash=%s date=%s)", message_hash, trade_date
+            )
             raise DuplicateSignalError(message_hash) from exc
 
         stored = StoredSignal(
@@ -139,14 +152,20 @@ class SignalRepository:
             created_at=created_at,
             signal=signal,
         )
-        logger.info("Stored signal id=%s: %s", stored.id, signal)
+        logger.info("Stored signal id=%s (date=%s): %s", stored.id, trade_date, signal)
         return stored
 
-    def exists(self, signal: Signal) -> bool:
-        """Return whether a signal with the same content hash is already stored."""
+    def exists(self, signal: Signal, *, on_date: date | None = None) -> bool:
+        """Return whether the same signal is already stored on ``on_date``.
+
+        ``on_date`` defaults to today in the repository's ``tz``. Pass an
+        explicit date (e.g. the trade engine's clock date) to keep the check
+        deterministic and aligned with the caller's notion of "today".
+        """
+        target_date = (on_date or datetime.now(self._tz).date()).isoformat()
         row = self._connection.execute(
-            "SELECT 1 FROM signals WHERE message_hash = ? LIMIT 1",
-            (signal_hash(signal),),
+            "SELECT 1 FROM signals WHERE message_hash = ? AND trade_date = ? LIMIT 1",
+            (signal_hash(signal), target_date),
         ).fetchone()
         return row is not None
 
