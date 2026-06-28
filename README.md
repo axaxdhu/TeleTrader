@@ -3,13 +3,19 @@
 Listens to Telegram trading signals and (in later phases) places trades through a
 broker API. Implemented so far: connect to Telegram and listen for new messages
 (Phase 1), deterministically parse them into structured signals (Phase 2),
-persist them to SQLite with duplicate rejection (Phase 3), and run each signal
+persist them to SQLite with per-day duplicate rejection (Phase 3), run each signal
 through a broker-agnostic **trade engine** that decides whether it should be
-traded.
+traded, and hand accepted orders to an **execution layer** (Phase 4). A live
+message now runs the full path *parse → evaluate → store → execute* via the
+`SignalPipeline`.
 
-The trade engine is the business-logic layer only — it never talks to a broker
-and never places orders. Broker integration (paper trading, then live Zerodha /
-FYERS) lands in Phases 4–5.
+The trade engine is the decision layer only — it never talks to a broker and
+never places orders. Accepted orders go to a broker-independent **execution
+layer** (Phase 4): an `Executor` chosen by `EXECUTION_MODE`. The first
+implementation, `DryRunExecutor`, validates an order, logs exactly what *would*
+be submitted, and records the attempt to SQLite — without contacting any broker
+or simulating a market. Live execution (`KiteExecutor`, `EXECUTION_MODE=kite`)
+lands in Phase 5 behind the same interface.
 
 ## Project structure
 
@@ -30,6 +36,7 @@ TeleTrader/
         ├── repository.py        # Signal persistence + dedupe
         ├── lot_size.py          # LotSizeProvider (config now, broker later)
         ├── trade_engine.py      # Business-logic decision layer (no broker)
+        ├── execution/           # Order execution layer (DryRunExecutor; Kite later)
         └── telegram_listener.py # Telethon listener
 ```
 
@@ -59,6 +66,7 @@ Copy `.env.example` to `.env` and fill in the values:
 | `MARKET_OPEN_TIME`       | no       | Trading-hours start, `HH:MM` (default `09:15`)           |
 | `MARKET_CLOSE_TIME`      | no       | Trading-hours end, `HH:MM` (default `15:30`)             |
 | `MARKET_TIMEZONE`        | no       | IANA tz for trading hours (default `Asia/Kolkata`)       |
+| `EXECUTION_MODE`         | no       | Executor to use: `dry_run` (default) or `kite` (not yet implemented) |
 
 ## Installation
 
@@ -88,11 +96,15 @@ On first run Telethon prompts for the login code sent to your Telegram account
 (and your 2FA password if enabled). This creates a `<session_name>.session` file
 so subsequent runs connect without prompting.
 
-Incoming messages are printed to the console and logged, e.g.:
+Incoming messages run through the pipeline; each prints a one-line outcome and is
+logged. A valid signal that the engine accepts produces a dry-run execution, e.g.:
 
 ```
-2026-06-24 10:00:00 | INFO     | teletrader.telegram_listener | Received message id=42 chat_id=-1001234567890: BUY NIFTY 25000 CE
-[2026-06-24 10:00:00] BUY NIFTY 25000 CE
+[10:00:00] SIGNAL #7 BUY NIFTY 23900 PE @165 SL 150 TGT 198+
+           → SUCCESS: Order would have been submitted successfully.
 ```
 
-Stop with `Ctrl+C`.
+with the full `[DRY RUN]` order block in the logs. Non-signals print `(ignored)`,
+a same-day repeat prints `(duplicate)`, and a signal the engine declines prints
+`→ not traded: <reason>` (e.g. `Auto-trading disabled` when `AUTO_TRADING=false`,
+the default). Stop with `Ctrl+C`.

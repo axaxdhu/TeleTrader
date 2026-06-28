@@ -4,18 +4,25 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 
 ## Status
 
-| Phase | Description                  | Status            |
-| ----- | ---------------------------- | ----------------- |
-| 1     | Telegram listener only       | ✅ Done & verified |
-| 2     | Signal parser                | ✅ Done (31 tests) |
-| 3     | Database storage             | ✅ Done (17 tests) |
-| —     | Trade engine (decision layer)| ✅ Done (15 tests) |
-| 4     | Paper trading                | ⏳ Not started     |
-| 5     | Live broker integration      | ⏳ Not started     |
+| Phase | Description                       | Status            |
+| ----- | --------------------------------- | ----------------- |
+| 1     | Telegram listener only            | ✅ Done & verified |
+| 2     | Signal parser                     | ✅ Done (32 tests) |
+| 3     | Database storage                  | ✅ Done (20 tests) |
+| —     | Trade engine (decision layer)     | ✅ Done (15 tests) |
+| 4     | Execution layer + live wiring     | ✅ Done (28 tests) |
+| 5     | Live broker integration (KiteExecutor) | ⏳ Not started |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
-> The trade engine is the broker-agnostic business-logic layer (it *decides*,
-> it does not *trade*); it precedes — and feeds — the Phase 4 broker adapter.
+> The trade engine is the broker-agnostic decision layer (it *decides*, it does
+> not *trade*); it feeds the **execution layer** (Phase 4), which *submits*
+> orders. The strategy is external (the Telegram signals) — this app executes
+> them; it does not simulate a market.
+>
+> **Plan change (2026-06-28):** an earlier iteration built a broker abstraction +
+> a simulated `PaperBroker` (fills/positions/P&L). That was **removed** in favour
+> of a leaner, broker-independent **execution layer** with interchangeable
+> `DryRunExecutor` / future `KiteExecutor`. See the Execution layer notes below.
 
 ## Phase 1 notes (completed 2026-06-24)
 
@@ -89,7 +96,8 @@ no broker integration (kept strictly to phase scope).
     *structured* fields in canonical order (not `raw_text`), so the same trade
     re-posted with different whitespace/casing/surrounding chatter collides;
     `165` and `165.0` hash identically. Enforced by a `UNIQUE(message_hash)`
-    column — DB is the source of truth, not just an app-level check.
+    column — DB is the source of truth, not just an app-level check. *(Updated
+    2026-06-28 to per-day dedupe — see "Dedupe change" below.)*
 - Wiring: `Config` gained `database_path` (`DATABASE_PATH` env, default
   `teletrader.db`); `main.py` builds one connection + repo and injects it into
   `TelegramListener(config, repository)`. The listener now parses → `add()`,
@@ -114,6 +122,7 @@ no broker integration (kept strictly to phase scope).
 | `target_open_ended` | INTEGER | 0/1 (the trailing `+`)                 |
 | `raw_text`          | TEXT    | original message, for audit            |
 | `created_at`        | TEXT    | ISO-8601 UTC                           |
+| `trade_date`        | TEXT    | trading day; `UNIQUE(message_hash, trade_date)` (v4) |
 
 ### Project structure (updated)
 
@@ -124,11 +133,27 @@ src/teletrader/
   database.py                   # NEW — connect() + migrations (user_version)
   repository.py                 # NEW — SignalRepository, StoredSignal, signal_hash
   parser.py                     # Phase 2 (unchanged)
-  telegram_listener.py          # now: parse → repo.add(), dedupe-aware
+  telegram_listener.py          # Telegram I/O only → SignalPipeline
+  pipeline.py                   # SignalPipeline: parse→evaluate→store→execute
   logging_config.py
+  trade_engine.py               # decision layer
+  lot_size.py                   # LotSizeProvider seam
+  execution/                    # order execution layer (broker-independent)
+    __init__.py                 #   re-exports public surface
+    base.py                     #   abstract Executor
+    models.py                   #   OrderRequest, ExecutionResult, enums
+    validation.py               #   validate_order() (shared gate)
+    dry_run.py                  #   DryRunExecutor
+    repository.py               #   ExecutionRepository, StoredExecution
+    exceptions.py               #   ExecutionError hierarchy
+    factory.py                  #   create_executor() — EXECUTION_MODE switch
 tests/
-  test_parser.py                # 31
-  test_repository.py            # NEW — 17
+  test_parser.py                # 32
+  test_repository.py            # 20
+  test_trade_engine.py          # 15
+  test_executor.py              # 15 — DryRunExecutor + factory + validation
+  test_execution_repository.py  # 8  — executions table CRUD + schema
+  test_pipeline.py              # 5  — end-to-end parse→evaluate→store→execute
 ```
 
 ## Trade engine notes (completed 2026-06-26)
@@ -181,6 +206,122 @@ broker, place orders, or know about Zerodha/FYERS (kept strictly to the brief).
   missing-lot-size rejection), and injectable rule sets. Total suite now
   **63 passing** (`uv run pytest`).
 
+## Broker abstraction + paper broker — REMOVED (2026-06-28)
+
+An earlier iteration (2026-06-27/28) built a broker abstraction layer
+(`src/teletrader/broker/`: abstract `Broker`, `OrderRequest`/`OrderResponse`/
+`Position`/`Balance`, `BrokerError` hierarchy) and a simulated `PaperBroker`
+(market/limit fills, slippage, brokerage, netted positions, realised P&L,
+`paper_orders`/`paper_positions` tables). **This was removed** at the user's
+direction: the trading strategy is external (the Telegram signals), so the app's
+job is to *execute* signals, not to *simulate a market*. It was replaced by the
+execution layer below. (History kept here so the schema-version jumps make sense:
+migrations v2/v3 created the paper tables; v5 drops them.)
+
+## Phase 4 notes — execution layer (completed 2026-06-28)
+
+A broker-independent **order execution layer**. The trade engine decides; an
+`Executor` *submits* the order. Two interchangeable implementations sit behind one
+interface, chosen by `EXECUTION_MODE`: `DryRunExecutor` (now) and a future
+`KiteExecutor` (live). No market data, no virtual positions, no P&L — the dry run
+only verifies the *correct order would have been sent*.
+
+- New package `src/teletrader/execution/` (small, focused modules — SOLID):
+  - `base.py` — abstract `Executor`: `mode` + `execute(OrderRequest) -> ExecutionResult`.
+  - `models.py` — `OrderRequest` (`symbol, transaction_type, quantity, order_type,
+    product, exchange, entry_price, stop_loss, target, signal_id`),
+    `ExecutionResult` (`status, order, remarks, broker_order_id, timestamp`), and
+    enums `ExecutionStatus` (SUCCESS/REJECTED/FAILED), `OrderType` (MARKET/LIMIT),
+    `ProductType`, `TransactionType`. All frozen/slotted, broker-independent.
+  - `validation.py` — `validate_order()`, the single shared gate (raises
+    `InvalidOrderError`); both executors use it so a request valid dry is valid live.
+  - `dry_run.py` — `DryRunExecutor`: validate → log the `[DRY RUN]` block of the
+    would-be order → record the attempt. Sends nothing. Valid → `SUCCESS`
+    ("Order would have been submitted successfully."); invalid → `REJECTED` with
+    the reason. `broker_order_id` is always `None`. Deps injected
+    (`ExecutionRepository`, optional `clock`).
+  - `repository.py` — `ExecutionRepository` / `StoredExecution` over the new
+    `executions` table (the `database`/`repository` split, mirrored).
+  - `exceptions.py` — `ExecutionError` hierarchy: `InvalidOrderError` (validation),
+    `OrderRejectedError`, `BrokerCommunicationError` (last two for the future live
+    executor to translate broker failures into).
+  - `factory.py` — `create_executor(config, repo)` returns the executor named by
+    `EXECUTION_MODE`; `kite` raises `NotImplementedError` (next phase). The one
+    place config maps to a class — switching modes is sufficient to switch executors.
+- **Schema:** migration **v5** drops `paper_orders`/`paper_positions` and creates
+  `executions` (id, signal_id FK→signals, timestamp, symbol, action, quantity,
+  order_type, entry_price, stop_loss, target, status, remarks). `SCHEMA_VERSION`
+  now **5**. Records execution *attempts*, not fills. Verified on the live DB:
+  v3→v5 preserved all 7 signals, dropped the paper tables, created `executions`.
+- **Config:** removed the four paper fields (and `_parse_float`); added
+  `execution_mode` (`EXECUTION_MODE`, default `dry_run`, validated against
+  {`dry_run`, `kite`}). `.env.example` updated.
+- **Independence:** the layer imports nothing from Telegram and no broker SDK.
+- Tests: `tests/test_executor.py` + `tests/test_execution_repository.py` cover
+  valid order, invalid order, `[DRY RUN]` logging, execution-history persistence
+  (incl. rejected attempts), config switching (dry_run ↔ kite-not-implemented ↔
+  bad mode → `ConfigError`), and the exception hierarchy. `test_trade_engine.py`'s
+  `_config()` swapped the paper fields for `execution_mode`. Total suite
+  **90 passing** (`uv run pytest`).
+
+## Pipeline wiring — live end-to-end (completed 2026-06-28)
+
+The execution layer is now **wired into the live listener**. A real Telegram
+message runs the full path: *parse → evaluate → store → execute (dry run)*.
+
+- New `src/teletrader/pipeline.py` — `SignalPipeline.process(text, when=None)`
+  orchestrates one message and returns a `PipelineResult`
+  (`IGNORED` / `DUPLICATE` / `NOT_TRADED` / `EXECUTED`). Telethon-free, so it is
+  unit-tested directly. Holds `build_order_request(signal, decision, signal_id)`
+  — the seam mapping `Signal` + `TradeDecision` → `OrderRequest` (symbol e.g.
+  `"NIFTY 23900 PE"`, `MARKET`, qty from the decision, entry/SL/target carried
+  for the log/audit), keeping the decision and execution layers decoupled.
+- **Ordering:** the engine evaluates **before** the signal is stored, so its
+  duplicate/daily-count rules see only *prior* history (not the row being
+  processed); `repository.add` is the authoritative same-day dedupe (a repeat →
+  `DuplicateSignalError` → `DUPLICATE`). *(Storing first would make the engine
+  flag every signal as a duplicate of itself — the bug caught while wiring.)*
+- `telegram_listener.py` — now owns **only** Telegram I/O: hands each message's
+  text to the pipeline and prints a one-line outcome. Constructor is
+  `TelegramListener(config, pipeline)`. Exceptions in processing are caught so one
+  bad message can't kill the listener. Listing/startup logs the execution mode.
+- `main.py` — composition root now builds `TradeEngine`, `ExecutionRepository`,
+  the executor (`create_executor`), and the `SignalPipeline`, and injects the
+  pipeline into the listener.
+- Tests: `tests/test_pipeline.py` (5) — ignored / executed / duplicate /
+  not-traded (auto-trading off) outcomes over real collaborators + in-memory DB,
+  plus the `build_order_request` mapping. Verified end-to-end: a valid signal logs
+  the `[DRY RUN]` block and records one `executions` row linked to the signal.
+  Total suite **95 passing** (`uv run pytest`).
+
+## Dedupe change — per trading day (2026-06-28)
+
+Duplicate detection is now **per day**: the same signal is rejected only if it
+was already stored **on the same trading day**, and is accepted again on a later
+day (signals legitimately recur day to day). Previously the same signal was
+rejected forever.
+
+- **Schema:** migration **v4** (`database.py`) adds a `trade_date` column and
+  changes the uniqueness key from `UNIQUE(message_hash)` to
+  `UNIQUE(message_hash, trade_date)`. SQLite can't drop a table-level UNIQUE, so
+  the `signals` table is rebuilt; existing rows backfill `trade_date` from the
+  date part of `created_at`. `SCHEMA_VERSION` now **4**. Verified on the live DB:
+  v3→v4 preserved all 7 rows and backfilled dates.
+- **Repository:** `SignalRepository(connection, *, tz=timezone.utc)` — the
+  trading day is `created_at` seen in `tz`. `add()` stores `trade_date` and
+  rejects only same-day repeats. `exists(signal, *, on_date=None)` is now
+  day-scoped (defaults to today in `tz`). `signal_hash()` is unchanged (still
+  pure content — its determinism tests stand).
+- **Engine:** `DuplicateRule` is unchanged; `_build_context` now calls
+  `exists(signal, on_date=now.date())` so "duplicate" means "seen today" by the
+  engine's own clock.
+- **Wiring:** `main.py` injects `tz=ZoneInfo(config.market_timezone)` so "day"
+  is the trading day, not a UTC day. (During market hours IST and UTC dates
+  coincide anyway; the tz matters only near midnight.)
+- Tests: +4 — repository same-day-rejected / different-day-accepted /
+  day-scoped `exists`, and an engine test that yesterday's signal is not a
+  duplicate today. (For the current suite total, see the execution-layer notes.)
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -221,11 +362,20 @@ broker, place orders, or know about Zerodha/FYERS (kept strictly to the brief).
 
 1. Point me at this file: "read docs/PROGRESS.md" (it is NOT auto-loaded).
 2. `uv sync` if the venv is missing, then `uv run python main.py` to run.
-3. `uv run pytest` to confirm the 63 tests pass.
+3. `uv run pytest` to confirm the 95 tests pass.
 4. Outstanding housekeeping: optionally set a real `TELEGRAM_CHANNEL` (currently
    `me`); no git remote configured yet.
 
 ## Next
 
-Phase 4 = paper trading. Not started; do not implement until explicitly
-requested (per `CLAUDE.md`).
+Phase 4 is complete and **wired end-to-end** (a live signal runs
+parse→evaluate→store→execute as a dry run). Note for a live test today: it's the
+weekend and `AUTO_TRADING` defaults **off**, so the engine returns `NOT_TRADED`
+("Auto-trading disabled" / "Market closed") and nothing reaches the executor —
+set `AUTO_TRADING=true` and run inside market hours (or relax the hours) to see a
+`[DRY RUN]` execution.
+
+**Phase 5 = `KiteExecutor`**: implement `Executor` against Kite Connect (auth,
+order placement, error translation, real `broker_order_id`) and enable it with
+`EXECUTION_MODE=kite` — no change to the engine, listener, pipeline, or models.
+Do not implement until explicitly requested (per `CLAUDE.md`).
