@@ -11,12 +11,12 @@ FYERS later) can be added without disturbing the ingestion or decision path.
 
 > **Status:** Phases 1–3 implemented (listener → parser → SQLite), plus the
 > **trade engine** (decision layer — no order placement) and the **execution
-> layer**: an `Executor` interface with `DryRunExecutor` (validates + logs +
-> records execution attempts to SQLite; sends nothing to any broker) as the
-> first implementation. `EXECUTION_MODE` selects the executor; the live
-> `KiteExecutor` (`kite`) arrives next phase. The whole path is now **wired
-> end-to-end** through a `SignalPipeline` — a live message runs *parse → store →
-> evaluate → execute (dry run)*. See `docs/PROGRESS.md`.
+> layer**: an `Executor` interface with two interchangeable implementations —
+> `DryRunExecutor` (validates + logs + records attempts to SQLite; sends nothing)
+> and `KiteExecutor` (submits **live** orders to Zerodha Kite Connect).
+> `EXECUTION_MODE` selects between them with **no code change**. The whole path is
+> wired **end-to-end** through a `SignalPipeline` — a live message runs *parse →
+> store → evaluate → execute*. See `docs/PROGRESS.md`.
 >
 > *(An earlier iteration built a simulated `PaperBroker` that modelled fills,
 > positions, and P&L; that was removed in favour of this leaner execution layer —
@@ -119,10 +119,13 @@ duplicate/daily-count facts.
 | `src/teletrader/repository.py` | Owns *what* is stored: `SignalRepository` (CRUD over the `signals` table), `StoredSignal`, `signal_hash()` (dedupe key), `DuplicateSignalError`. Maps `Signal` ↔ rows. The only module that issues SQL against `signals`. Also exposes `count_since()` for the engine's daily-limit rule. |
 | `src/teletrader/trade_engine.py` | **Business-logic / decision layer.** `TradeEngine.evaluate(Signal) -> TradeDecision`. Composes config-driven `TradeRule`s (validity, auto-trading toggle, trading hours, duplicate, daily limit, lot size). Sizes the order as `lots × lot_size`. **Broker-agnostic: no Zerodha/FYERS, no order placement.** Knows nothing of how a decision is executed. |
 | `src/teletrader/lot_size.py` | The `LotSizeProvider` seam: resolves an underlying's exchange lot size. `ConfigLotSizeProvider` serves it from `.env` today; a `BrokerLotSizeProvider` (Phase 5) will read it from the broker instrument master — same interface, no engine change. |
-| `src/teletrader/execution/` | **Order execution layer.** The broker-independent seam between the decision layer and a broker. `base.py` — abstract `Executor` (`mode`, `execute(OrderRequest) -> ExecutionResult`). `models.py` — `OrderRequest`, `ExecutionResult`, and enums (`ExecutionStatus`, `OrderType`, `ProductType`, `TransactionType`). `validation.py` — `validate_order()` (shared gate, raises `InvalidOrderError`). `dry_run.py` — `DryRunExecutor` (see below). `repository.py` — `ExecutionRepository` over the `executions` table. `exceptions.py` — the `ExecutionError` hierarchy. `factory.py` — `create_executor(config, repo)` picks the executor from `EXECUTION_MODE`. Independent of Telegram and of any broker SDK. |
-| `src/teletrader/execution/dry_run.py` | **`DryRunExecutor` — first concrete `Executor` (Phase 4).** Validates an `OrderRequest`, logs **exactly what would be submitted** (`[DRY RUN] …`), and records the attempt to SQLite — but contacts **no broker** and models no fills/positions/P&L. A valid order → `SUCCESS` ("would have been submitted"); an invalid one → `REJECTED` with the reason. Exists to validate the pipeline end-to-end before live trading; the future `KiteExecutor` replaces it behind the same interface by changing `EXECUTION_MODE`. |
+| `src/teletrader/execution/` | **Order execution layer.** The broker-independent seam between the decision layer and a broker. `base.py` — abstract `Executor` (`mode`, `execute(OrderRequest) -> ExecutionResult`). `models.py` — `OrderRequest`, `ExecutionResult`, and enums (`ExecutionStatus`, `OrderType`, `ProductType`, `TransactionType`). `validation.py` — `validate_order()` (shared gate, raises `InvalidOrderError`). `dry_run.py` — `DryRunExecutor` (see below). `kite.py` — `KiteExecutor` (see below). `repository.py` — `ExecutionRepository` over the `executions` table. `exceptions.py` — the `ExecutionError` hierarchy. `factory.py` — `create_executor(config, repo)` picks the executor from `EXECUTION_MODE`. The package is independent of Telegram; the **only** module that imports a broker SDK is `kite.py` (and it does so lazily). |
+| `src/teletrader/execution/dry_run.py` | **`DryRunExecutor` — the `dry_run` `Executor`.** Validates an `OrderRequest`, logs **exactly what would be submitted** (`[DRY RUN] …`), and records the attempt to SQLite — but contacts **no broker** and models no fills/positions/P&L. A valid order → `SUCCESS` ("would have been submitted"); an invalid one → `REJECTED` with the reason. Used to validate the pipeline end-to-end before live trading. |
+| `src/teletrader/execution/kite.py` | **`KiteExecutor` — the `kite` (live) `Executor`.** Builds a Kite Connect client from the configured credentials (manual auth — a valid access token is assumed; it never logs in or generates tokens), **resolves the option to its exact tradingsymbol** (via the injected resolver), translates the `OrderRequest` into Kite `place_order` parameters, submits the order, and returns a broker-neutral `ExecutionResult` (with the real `broker_order_id` on success). Every Kite/transport failure is translated (via `translate_broker_exception`) into the `ExecutionError` hierarchy and returned as a structured `FAILED`/`REJECTED` result — it never crashes the app. The **only** place a broker SDK is touched; the SDK import is lazy so `dry_run` never loads it. |
+| `src/teletrader/execution/kite_instruments.py` | **`KiteInstrumentResolver` — option → tradingsymbol resolution.** A signal names an option only by underlying/strike/type (no expiry); Kite needs the exact `tradingsymbol`. The resolver fetches Kite's NFO instrument master once per trading day (cached), indexes the option contracts, and returns the **nearest expiry on/after the order date** — i.e. the current weekly. Returns a `ResolvedInstrument` (tradingsymbol, exchange, expiry, lot_size); no match → `InstrumentNotFoundError`. Injected into `KiteExecutor` (a fake is injected in tests). The `lot_size` it exposes is the seam a future `BrokerLotSizeProvider` will reuse. |
 | `list_dialogs.py` | Standalone dev helper to list Telegram chats/ids for `.env` configuration. Not part of the runtime path. |
-| `tests/` | `test_parser.py`, `test_repository.py`, `test_trade_engine.py`, `test_executor.py`, `test_execution_repository.py` — unit tests run with `uv run pytest`. |
+| `kite_login.py` | Standalone helper to generate the **daily** Kite access token (tokens expire ~6 AM IST). Prints the login URL, takes the `request_token` from the browser redirect, exchanges it with `KITE_API_SECRET`, and writes `KITE_ACCESS_TOKEN` to `.env`. Manual login only — no password/2FA is automated or stored. Not part of the runtime path. |
+| `tests/` | `test_parser.py`, `test_repository.py`, `test_trade_engine.py`, `test_executor.py`, `test_execution_repository.py`, `test_kite_executor.py`, `test_kite_instruments.py`, `test_pipeline.py` — unit tests run with `uv run pytest`. |
 
 ## Interfaces between modules
 
@@ -198,7 +201,8 @@ its neighbours.
   Executor.execute(order: OrderRequest) -> ExecutionResult
   OrderRequest(symbol, transaction_type, quantity, order_type=MARKET,
                product=INTRADAY, exchange="NFO", entry_price=None,
-               stop_loss=None, target=None, signal_id=None)
+               stop_loss=None, target=None, signal_id=None,
+               underlying=None, strike=None, option_type=None)
   ExecutionResult(status: ExecutionStatus, order, remarks, broker_order_id=None, timestamp)
   ```
   `OrderRequest`/`ExecutionResult` are broker-independent; `broker_order_id` is
@@ -244,6 +248,7 @@ the verdict) — *not* market fills, positions, or P&L.
 | `target` | REAL | nullable |
 | `status` | TEXT | `ExecutionStatus` — SUCCESS / REJECTED / FAILED |
 | `remarks` | TEXT | human-readable note (e.g. rejection reason) |
+| `broker_order_id` | TEXT | the broker's order id (live `kite` success); `NULL` for a dry run or any non-success |
 
 ## Key design decisions
 
@@ -369,17 +374,18 @@ not above it.
    │  execute(OrderRequest) -> ExecutionResult             │
    └──────────────────────────────────────────────────────┘
             ▲                                   ▲
-            │  EXECUTION_MODE=dry_run            │  EXECUTION_MODE=kite (next phase)
+            │  EXECUTION_MODE=dry_run            │  EXECUTION_MODE=kite
      ┌────────────────┐                  ┌────────────────┐
      │ DryRunExecutor │                  │  KiteExecutor  │
-     │ validate + log │                  │ submits to     │
-     │ + record;      │                  │ Zerodha Kite   │  ← broker integration
-     │ sends nothing  │                  │ (Kite Connect) │     lives HERE only
-     └───────┬────────┘                  └────────────────┘
-             │ ExecutionRepository
-             ▼
-        ┌──────────────────┐   executions (attempt + verdict; no fills/positions)
-        │      SQLite       │
+     │ validate + log │                  │ validate +     │
+     │ + record;      │                  │ place_order →  │  ← broker integration
+     │ sends nothing  │                  │ Zerodha Kite   │     lives HERE only
+     └───────┬────────┘                  └───────┬────────┘
+             │                                   │ ExecutionRepository
+             └─────────────────┬─────────────────┘
+                               ▼
+        ┌──────────────────┐   executions (attempt + verdict + broker_order_id;
+        │      SQLite       │   no fills/positions)
         │  teletrader.db    │
         └──────────────────┘
 ```
@@ -395,20 +401,23 @@ class Executor(ABC):
 
 - **Value objects** (frozen dataclasses, broker-independent): `OrderRequest`
   (`symbol, transaction_type, quantity, order_type, product, exchange,
-  entry_price, stop_loss, target, signal_id`) and `ExecutionResult`
-  (`status, order, remarks, broker_order_id, timestamp`).
+  entry_price, stop_loss, target, signal_id` + structured option fields
+  `underlying, strike, option_type` for live symbol resolution) and
+  `ExecutionResult` (`status, order, remarks, broker_order_id, timestamp`).
 - **Enums**: `ExecutionStatus` (SUCCESS / REJECTED / FAILED), `OrderType`
   (MARKET / LIMIT), `ProductType` (INTRADAY / MARGIN / DELIVERY),
   `TransactionType` (BUY / SELL).
 - **Exceptions** — `except ExecutionError` catches the family: `ExecutionError` →
-  `InvalidOrderError` (validation), `OrderRejectedError`,
-  `BrokerCommunicationError` (the last two for the future live executor to
-  translate broker failures into).
+  `InvalidOrderError` (validation), `OrderRejectedError` (→ `InsufficientMarginError`),
+  `AuthenticationError`, `BrokerCommunicationError` (→ `RateLimitError`). The
+  `KiteExecutor` translates the Kite SDK's native exceptions into these
+  broker-neutral categories, then returns them as structured results rather than
+  raising.
 - **Validation** — `validate_order(order)` is the single shared gate (raises
   `InvalidOrderError`); both executors use it so behaviour is identical.
 - **Selection** — `create_executor(config, repository)` returns the executor named
   by `EXECUTION_MODE`. This is the only place that maps the config string to a
-  class; `kite` currently raises `NotImplementedError`.
+  class; `dry_run` → `DryRunExecutor`, `kite` → `KiteExecutor`.
 
 ### The `DryRunExecutor`
 
@@ -431,6 +440,95 @@ A valid order yields `ExecutionResult(status=SUCCESS, …)`; an invalid one yiel
 `status=REJECTED` with the validation reason in `remarks`. Both outcomes are
 logged and written to the `executions` table — `broker_order_id` is always `None`
 because nothing was actually submitted.
+
+### The `KiteExecutor` (live)
+
+The live executor — the only module in the system that talks to a broker SDK.
+Selecting it is purely configuration (`EXECUTION_MODE=kite`); nothing upstream
+(engine, pipeline, listener, models) changes or learns that Kite exists.
+
+**Responsibilities (and only these):**
+
+1. **Build the client at init** from `KITE_API_KEY` + `KITE_ACCESS_TOKEN`.
+   Authentication is **manual**: a valid access token is assumed to already
+   exist. The app *never* logs in and *never* generates a token. (`KITE_API_SECRET`
+   is read/required for completeness but is only used in the external token-
+   generation flow the user performs themselves.) The Kite SDK is imported
+   **lazily**, so `dry_run` mode never loads it.
+2. **Resolve the tradingsymbol.** A signal names an option only by
+   underlying/strike/type — `KiteInstrumentResolver` looks up Kite's instrument
+   master and picks the **nearest weekly** expiry (nearest expiry on/after the
+   order date, in the market timezone). No match → `InstrumentNotFoundError` →
+   `REJECTED`; a failed master fetch → `FAILED`.
+3. **Translate** the `OrderRequest` (+ resolved contract) into Kite `place_order`
+   parameters — the only Kite-specific mapping in the codebase:
+   `variety="regular"`, `product` → `MIS`/`NRML`/`CNC` (INTRADAY/MARGIN/DELIVERY),
+   the resolved `tradingsymbol`/`exchange`, `transaction_type`/`order_type` pass
+   through (the neutral spellings match Kite's), and a `price` is added for LIMIT
+   orders. Kite models never leak outside this module.
+4. **Submit** the order and return a broker-neutral `ExecutionResult` (never a
+   raw Kite response). On success: `status=SUCCESS` with the real
+   `broker_order_id`.
+5. **Translate every failure** into a structured result instead of crashing
+   (see *Error flow* below).
+6. **Log** the attempt — timestamp, signal id, order, resolved tradingsymbol,
+   broker response, result, and execution duration — and **record** it to the
+   `executions` table (including `broker_order_id`). Secrets are never logged.
+
+Example log line for a successful order:
+
+```
+[KITE] BUY NIFTY 23900 PE tradingsymbol=NIFTY2570323900PE qty=65 type=MARKET \
+       signal_id=42 status=SUCCESS broker_order_id=240629000123456 \
+       response=240629000123456 duration=83.4ms \
+       remarks=Order submitted to Kite (NIFTY2570323900PE, expiry 2026-07-03).
+```
+
+#### Error flow
+
+`KiteExecutor.execute()` never raises — every failure comes back as an
+`ExecutionResult`. `translate_broker_exception()` maps the SDK's native errors to
+the broker-neutral hierarchy, and a small rule picks the status: a broker *order*
+rejection is `REJECTED`; anything that prevented the call from completing is
+`FAILED`.
+
+| Failure | Kite exception | Translated to | Result status |
+| --- | --- | --- | --- |
+| Order request fails the shared validation gate | — (caught before any call) | `InvalidOrderError` | `REJECTED` |
+| No contract found for the option (bad strike, none upcoming) | — (resolution) | `InstrumentNotFoundError` | `REJECTED` |
+| Instrument master fetch fails (token/network) | `TokenException` / `NetworkException` | `Authentication`/`BrokerCommunicationError` | `FAILED` |
+| Order rejected by the broker (RMS, frozen qty, …) | `OrderException` | `OrderRejectedError` | `REJECTED` |
+| Insufficient margin / funds | `OrderException` (message) | `InsufficientMarginError` | `REJECTED` |
+| Market closed | `OrderException` (message) | `OrderRejectedError` | `REJECTED` |
+| Invalid symbol / bad params | `InputException` | `OrderRejectedError` | `REJECTED` |
+| Invalid / expired access token | `TokenException` | `AuthenticationError` | `FAILED` |
+| Network failure / timeout | `NetworkException`, `requests` timeout | `BrokerCommunicationError` | `FAILED` |
+| Rate limited (HTTP 429) | `NetworkException` (429) | `RateLimitError` | `FAILED` |
+| Anything else (unexpected) | any `Exception` | `BrokerCommunicationError` | `FAILED` |
+
+Every attempt — success, rejection, or failure — is logged and persisted, so the
+`executions` table is a complete audit trail.
+
+#### Configuration
+
+| Env var | Required when | Purpose |
+| --- | --- | --- |
+| `EXECUTION_MODE` | always (default `dry_run`) | `dry_run` or `kite` — selects the executor, no code change |
+| `KITE_API_KEY` | `EXECUTION_MODE=kite` | Kite Connect app API key |
+| `KITE_API_SECRET` | `EXECUTION_MODE=kite` | Kite app secret (used only by the manual token flow) |
+| `KITE_ACCESS_TOKEN` | `EXECUTION_MODE=kite` | the (manually generated) daily access token |
+
+When `EXECUTION_MODE=kite`, config load **fails fast** if any of the three
+`KITE_*` values is missing. In `dry_run` they are optional and ignored.
+
+The access token **expires daily** (Zerodha invalidates it ~6 AM IST), so it must
+be regenerated before each trading day. The `kite_login.py` helper does this: it
+prints the login URL, you log in in the browser, paste back the `request_token`,
+and it exchanges it (with `KITE_API_SECRET`) and writes the fresh
+`KITE_ACCESS_TOKEN` to `.env`. The login itself is manual — no password/2FA is
+automated or stored. Because `KiteExecutor` builds its client once at startup,
+refresh the token **before** starting the app each day (the natural pattern, since
+the token dies before the 9:15 market open anyway).
 
 ### Execution sequence (wired)
 
@@ -459,22 +557,42 @@ Telegram  Listener  Pipeline   Parser   TradeEngine  SignalRepo  Executor(dry_ru
 ```
 
 Only the rightmost `Executor` is mode-specific; everything to its left is
-unchanged whether the executor is dry-run or Kite. Swapping `EXECUTION_MODE` (and,
-next phase, adding `KiteExecutor`) is the only difference between validating the
-pipeline and trading live.
+identical whether the executor is dry-run or Kite. In `kite` mode the single
+changed step is the executor's body — instead of the `[DRY RUN]` log it calls
+`kite.place_order(...)` and fills `broker_order_id` from the broker's response:
+
+```
+   …  Pipeline ──build OrderRequest──► KiteExecutor.execute()
+                                          │  validate_order()                  (REJECTED on failure)
+                                          │  resolver.resolve() ──────────────► Kite instrument master
+                                          │      → nearest-weekly tradingsymbol (InstrumentNotFound → REJECTED)
+                                          │  place_order(**kite_params) ──────► Zerodha Kite
+                                          │      ▲ TokenException / OrderException / NetworkException …
+                                          │      └─ translate_broker_exception() → FAILED | REJECTED
+                                          │  ExecutionResult(status, broker_order_id, remarks)
+                                          ├──[KITE] log (incl. duration) ────► ExecRepo.add()
+                                          ▼
+   …  ◄──────────────────────────────── PipelineResult (EXECUTED)
+```
+
+Swapping `EXECUTION_MODE` between `dry_run` and `kite` is the *only* difference
+between validating the pipeline and trading live — the business logic is untouched.
 
 ## Where future phases plug in
 
 - **Phase 4 wiring — done**: the `SignalPipeline` drives the full live loop
   (*parse → evaluate → store → execute*); `main.py` builds the executor via
   `create_executor(config, execution_repository)` and injects the pipeline into the
-  listener. Sending a Telegram signal now records a dry-run execution attempt.
-- **Phase 5 (live broker) = `KiteExecutor`**: implement `Executor` against the
-  Kite Connect SDK (auth, order placement, error translation into the
-  `ExecutionError` hierarchy), returning an `ExecutionResult` with the real
-  `broker_order_id`. Enable it with `EXECUTION_MODE=kite` — no change to the
-  engine, listener, or models. A `BrokerLotSizeProvider` (from the broker
-  instrument master) can likewise replace the config-backed lot sizes.
+  listener. Sending a Telegram signal records an execution attempt.
+- **Phase 5 (live broker) = `KiteExecutor` — done**: implements `Executor`
+  against the Kite Connect SDK (manual-auth client, nearest-weekly tradingsymbol
+  resolution via `KiteInstrumentResolver`, order placement, error translation into
+  the `ExecutionError` hierarchy), returning an `ExecutionResult` with the real
+  `broker_order_id`. Enabled with `EXECUTION_MODE=kite` — no change to the engine,
+  listener, or pipeline. **Open follow-up**: a `BrokerLotSizeProvider` can source
+  lot sizes from the instrument master (the `KiteInstrumentResolver` already
+  surfaces `lot_size`) and replace the config-backed lot sizes behind the existing
+  `LotSizeProvider` seam — no engine change.
 - **More risk rules**: append `TradeRule`s (position sizing, per-underlying
   caps, exposure limits) to the engine's rule set — no engine changes needed.
 - **Notifications**: a thin sink subscribed to `ExecutionResult` / stored-signal

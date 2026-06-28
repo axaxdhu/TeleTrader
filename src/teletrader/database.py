@@ -141,6 +141,12 @@ _MIGRATIONS: tuple[str, ...] = (
         remarks     TEXT
     );
     """,
+    # v6 — record the broker's order id on each execution. The dry run leaves it
+    # NULL (nothing is submitted); the live KiteExecutor stores the id Kite
+    # returns, so a live attempt can be traced back to the broker.
+    """
+    ALTER TABLE executions ADD COLUMN broker_order_id TEXT;
+    """,
 )
 
 #: The schema version this build expects. Equals the number of migrations.

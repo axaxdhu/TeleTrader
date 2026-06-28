@@ -65,6 +65,9 @@ def _config(**overrides: object) -> Config:
         market_close=time(15, 30),
         market_timezone="Asia/Kolkata",
         execution_mode="dry_run",
+        kite_api_key=None,
+        kite_api_secret=None,
+        kite_access_token=None,
     )
     defaults.update(overrides)
     return Config(**defaults)  # type: ignore[arg-type]
@@ -146,3 +149,7 @@ def test_build_order_request_maps_fields() -> None:
     assert order.stop_loss == 150.0
     assert order.target == 198.0
     assert order.signal_id == 7
+    # Structured option fields for live symbol resolution travel alongside.
+    assert order.underlying == "NIFTY"
+    assert order.strike == 23900
+    assert order.option_type == "PE"

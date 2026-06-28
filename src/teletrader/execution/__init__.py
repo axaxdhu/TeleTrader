@@ -8,8 +8,8 @@ implementations are interchangeable behind the interface, chosen by
 - :class:`DryRunExecutor` (``dry_run``) — validates, logs exactly what would be
   submitted, and records the attempt to SQLite. Sends nothing to any broker;
   models no fills, positions, or P&L. Used to validate the pipeline end-to-end.
-- ``KiteExecutor`` (``kite``) — submits to Zerodha Kite. Arrives next phase,
-  behind this same interface.
+- :class:`KiteExecutor` (``kite``) — submits live orders to Zerodha Kite behind
+  this same interface. The only module that touches a broker SDK.
 
 This layer is independent of Telegram and of any broker SDK. Public surface
 (import from ``teletrader.execution``):
@@ -27,12 +27,22 @@ from __future__ import annotations
 from .base import Executor
 from .dry_run import DryRunExecutor
 from .exceptions import (
+    AuthenticationError,
     BrokerCommunicationError,
     ExecutionError,
+    InstrumentNotFoundError,
+    InsufficientMarginError,
     InvalidOrderError,
     OrderRejectedError,
+    RateLimitError,
 )
 from .factory import KITE_MODE, create_executor
+from .kite import KiteExecutor
+from .kite_instruments import (
+    InstrumentResolver,
+    KiteInstrumentResolver,
+    ResolvedInstrument,
+)
 from .models import (
     ExecutionResult,
     ExecutionStatus,
@@ -45,6 +55,7 @@ from .repository import ExecutionRepository, StoredExecution
 from .validation import validate_order
 
 __all__ = [
+    "AuthenticationError",
     "BrokerCommunicationError",
     "ExecutionError",
     "ExecutionRepository",
@@ -52,12 +63,19 @@ __all__ = [
     "ExecutionStatus",
     "Executor",
     "DryRunExecutor",
+    "InstrumentNotFoundError",
+    "InstrumentResolver",
+    "InsufficientMarginError",
     "InvalidOrderError",
     "KITE_MODE",
+    "KiteExecutor",
+    "KiteInstrumentResolver",
     "OrderRejectedError",
     "OrderRequest",
     "OrderType",
     "ProductType",
+    "RateLimitError",
+    "ResolvedInstrument",
     "StoredExecution",
     "TransactionType",
     "create_executor",

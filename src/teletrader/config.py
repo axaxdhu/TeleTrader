@@ -47,6 +47,13 @@ class Config:
     market_timezone: str
     # --- Order execution (Phase 4) -------------------------------------------
     execution_mode: str
+    # --- Live broker: Zerodha Kite (Phase 5) ---------------------------------
+    # Only required when execution_mode == "kite". Authentication is manual: a
+    # valid access token is assumed to already exist (this app never logs in nor
+    # generates tokens). Secrets, never logged.
+    kite_api_key: str | None
+    kite_api_secret: str | None
+    kite_access_token: str | None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -65,6 +72,8 @@ class Config:
                 "TELEGRAM_API_ID must be an integer"
             ) from exc
 
+        execution_mode = _parse_execution_mode("EXECUTION_MODE", default="dry_run")
+
         return cls(
             api_id=api_id,
             api_hash=_require("TELEGRAM_API_HASH"),
@@ -81,7 +90,8 @@ class Config:
             market_open=_parse_time("MARKET_OPEN_TIME", default="09:15"),
             market_close=_parse_time("MARKET_CLOSE_TIME", default="15:30"),
             market_timezone=_parse_timezone("MARKET_TIMEZONE", default="Asia/Kolkata"),
-            execution_mode=_parse_execution_mode("EXECUTION_MODE", default="dry_run"),
+            execution_mode=execution_mode,
+            **_parse_kite_credentials(execution_mode),
         )
 
 
@@ -143,6 +153,38 @@ def _parse_execution_mode(name: str, *, default: str) -> str:
         allowed = ", ".join(sorted(_EXECUTION_MODES))
         raise ConfigError(f"{name} must be one of {{{allowed}}}, got {value!r}")
     return value
+
+
+def _parse_kite_credentials(execution_mode: str) -> dict[str, str | None]:
+    """Read the Kite credentials, requiring them only when running live.
+
+    For ``EXECUTION_MODE=kite`` all three (``KITE_API_KEY``, ``KITE_API_SECRET``,
+    ``KITE_ACCESS_TOKEN``) must be set — missing ones fail fast at startup. For
+    ``dry_run`` they are optional (and usually absent). Authentication is manual:
+    the access token is assumed already valid; this app never logs in.
+    """
+    creds = {
+        "kite_api_key": os.getenv("KITE_API_KEY") or None,
+        "kite_api_secret": os.getenv("KITE_API_SECRET") or None,
+        "kite_access_token": os.getenv("KITE_ACCESS_TOKEN") or None,
+    }
+    if execution_mode == "kite":
+        missing = [
+            env
+            for env, field in (
+                ("KITE_API_KEY", "kite_api_key"),
+                ("KITE_API_SECRET", "kite_api_secret"),
+                ("KITE_ACCESS_TOKEN", "kite_access_token"),
+            )
+            if creds[field] is None
+        ]
+        if missing:
+            raise ConfigError(
+                "EXECUTION_MODE=kite requires "
+                + ", ".join(missing)
+                + " to be set"
+            )
+    return creds
 
 
 def _parse_lot_sizes(name: str) -> Mapping[str, int]:

@@ -11,7 +11,7 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | 3     | Database storage                  | ✅ Done (20 tests) |
 | —     | Trade engine (decision layer)     | ✅ Done (15 tests) |
 | 4     | Execution layer + live wiring     | ✅ Done (28 tests) |
-| 5     | Live broker integration (KiteExecutor) | ⏳ Not started |
+| 5     | Live broker integration (KiteExecutor) | ✅ Done (22 tests) |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
 > The trade engine is the broker-agnostic decision layer (it *decides*, it does
@@ -144,6 +144,8 @@ src/teletrader/
     models.py                   #   OrderRequest, ExecutionResult, enums
     validation.py               #   validate_order() (shared gate)
     dry_run.py                  #   DryRunExecutor
+    kite.py                     #   KiteExecutor (live Zerodha Kite; lazy SDK)
+    kite_instruments.py         #   KiteInstrumentResolver (symbol resolution)
     repository.py               #   ExecutionRepository, StoredExecution
     exceptions.py               #   ExecutionError hierarchy
     factory.py                  #   create_executor() — EXECUTION_MODE switch
@@ -151,9 +153,11 @@ tests/
   test_parser.py                # 32
   test_repository.py            # 20
   test_trade_engine.py          # 15
-  test_executor.py              # 15 — DryRunExecutor + factory + validation
+  test_executor.py              # 16 — DryRunExecutor + factory + validation
   test_execution_repository.py  # 8  — executions table CRUD + schema
-  test_pipeline.py              # 5  — end-to-end parse→evaluate→store→execute
+  test_pipeline.py              # 6  — end-to-end parse→evaluate→store→execute
+  test_kite_executor.py         # 27 — KiteExecutor (mocked Kite) + resolution + errors
+  test_kite_instruments.py      # 9  — KiteInstrumentResolver (fixture data)
 ```
 
 ## Trade engine notes (completed 2026-06-26)
@@ -322,6 +326,97 @@ rejected forever.
   day-scoped `exists`, and an engine test that yesterday's signal is not a
   duplicate today. (For the current suite total, see the execution-layer notes.)
 
+## Phase 5 notes — live Kite execution (completed 2026-06-28)
+
+The live broker executor. `KiteExecutor` implements the **same** `Executor`
+interface as `DryRunExecutor`; switching `EXECUTION_MODE` from `dry_run` to `kite`
+is the only change needed to trade live — the engine, pipeline, listener, and
+models are untouched and stay completely unaware of Kite.
+
+- New `src/teletrader/execution/kite.py` — `KiteExecutor`:
+  - **Manual auth.** Builds a `kiteconnect.KiteConnect` client at init from
+    `KITE_API_KEY` + `KITE_ACCESS_TOKEN` and calls `set_access_token()`. It
+    **never** logs in or generates a token (a valid daily token is assumed to
+    exist). The SDK is imported **lazily** (only when a real client is built), so
+    `dry_run` never loads the heavy `kiteconnect`/twisted stack and the module is
+    importable without it.
+  - **Tradingsymbol resolution** — a signal names an option only by
+    underlying/strike/type (no expiry); Kite needs the exact `tradingsymbol`.
+    `KiteInstrumentResolver` (`kite_instruments.py`) fetches Kite's NFO instrument
+    master **once per trading day** (cached), indexes the option contracts, and
+    returns the **nearest expiry on/after the order date** — the current weekly
+    (nearest monthly for underlyings without weeklies; derived from the master, no
+    hardcoded NSE rules). Returns `ResolvedInstrument(tradingsymbol, exchange,
+    expiry, lot_size)`; no match → `InstrumentNotFoundError` → `REJECTED`. Injected
+    into the executor (a fake resolver is injected in tests). The order date is the
+    market-tz date (the executor takes `tz`, wired from `MARKET_TIMEZONE`).
+  - **Structured fields on `OrderRequest`** — `underlying`/`strike`/`option_type`
+    now travel alongside the readable `symbol` (`build_order_request` sets them) so
+    the executor can resolve; `symbol` stays the display string for logs/dry-run.
+  - **Order translation** (`_to_kite_params`) — the only Kite-specific mapping in
+    the codebase: `variety="regular"`, `product` → `MIS`/`NRML`/`CNC`, the resolved
+    `tradingsymbol`/`exchange`, a `price` for LIMIT orders;
+    `transaction_type`/`order_type` pass through (neutral spellings already match
+    Kite). No Kite type leaks out.
+  - **Shared validation gate** first (`validate_order`), so a request valid dry is
+    valid live; a validation failure → `REJECTED` before any broker call.
+  - **Returns `ExecutionResult`**, never a raw Kite response — `SUCCESS` carries
+    the real `broker_order_id`.
+  - **Never crashes.** `execute()` catches everything and returns a structured
+    result. `translate_broker_exception()` maps the SDK's native errors to the
+    neutral hierarchy; `_status_for` picks the status:
+    `REJECTED` for broker order rejections (incl. insufficient margin, market
+    closed, invalid symbol), `FAILED` for token/network/rate-limit/unexpected.
+  - **Logging** — one `[KITE]` line per attempt: timestamp, signal id, order,
+    broker response, status, `broker_order_id`, and **execution duration**.
+    Secrets are never logged.
+- **Exceptions** (`exceptions.py`) — added `AuthenticationError`,
+  `InsufficientMarginError(OrderRejectedError)`, `RateLimitError(BrokerCommunicationError)`,
+  and `InstrumentNotFoundError(OrderRejectedError)` to the `ExecutionError` family.
+  Clear, testable failure categories.
+- **Config** — added `kite_api_key`, `kite_api_secret`, `kite_access_token`
+  (`KITE_*` env). Required **only** when `EXECUTION_MODE=kite` — config load fails
+  fast if any is missing; optional/ignored in `dry_run`. `.env.example` updated.
+- **Factory** — `create_executor` now returns `KiteExecutor` for `kite` (passing
+  the credentials); it no longer raises `NotImplementedError`.
+- **Schema:** migration **v6** adds a `broker_order_id` column to `executions`
+  (the live success path records the broker's id; `NULL` for dry run / non-success).
+  `SCHEMA_VERSION` now **6**. `ExecutionRepository`/`StoredExecution` carry it.
+  Verified: v1→v6 migrates cleanly and preserves existing rows.
+- **Dependency:** `kiteconnect==5.2.0` added (`pyproject.toml` / `uv.lock`).
+- **Daily token helper** (`kite_login.py`, project root) — Kite access tokens
+  expire every morning (~6 AM IST). This standalone helper regenerates one: it
+  prints the login URL, you log in in the browser, paste the `request_token` (or
+  the whole redirect URL) back, and it exchanges it (with `KITE_API_SECRET`) and
+  writes `KITE_ACCESS_TOKEN` into `.env`. Manual login only — no password/2FA is
+  automated or stored. `--request-token` / `--env-file` flags for scripting.
+  Since `KiteExecutor` builds its client at startup, refresh the token **before**
+  starting the app each trading day. (Untracked-style dev helper, like
+  `list_dialogs.py`; not on the runtime path.)
+- Tests:
+  - `tests/test_kite_executor.py` (27) — all with **mocked** Kite responses (fake
+    client + fake resolver; no network): successful order, rejected order, invalid
+    token, insufficient funds, market closed, invalid symbol, network timeout,
+    network error, rate limit, unexpected exception; **resolution** (resolve called
+    with the right args/date, market-tz date selection, unresolvable → `REJECTED`,
+    missing option details → `REJECTED`, master-fetch failure → `FAILED`); the
+    param translation (incl. product codes + LIMIT price + resolved tradingsymbol),
+    persistence (incl. `broker_order_id`), `[KITE]` logging with duration,
+    no-secrets-in-logs, missing-credentials fail, exception translation, and **two
+    guards that the Trade Engine never sees Kite**.
+  - `tests/test_kite_instruments.py` (9) — `KiteInstrumentResolver` over fixture
+    data: nearest-weekly selection, past-expiry skip, expiry-day eligibility,
+    CE/PE + strike + underlying isolation, not-found, **per-day caching** (one
+    fetch/day, refetch on a new day), and tolerant parsing (datetime expiry, float
+    strike, malformed rows).
+  - `test_executor.py`'s kite test flipped from "not implemented" to "builds a
+    `KiteExecutor`". Total suite now **131 passing** (`uv run pytest`).
+
+**Known follow-up (out of scope here):** a `BrokerLotSizeProvider` can source lot
+sizes from the instrument master (`KiteInstrumentResolver` already surfaces
+`lot_size`) and replace the config-backed lot sizes behind the existing
+`LotSizeProvider` seam — no engine change needed.
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -362,20 +457,27 @@ rejected forever.
 
 1. Point me at this file: "read docs/PROGRESS.md" (it is NOT auto-loaded).
 2. `uv sync` if the venv is missing, then `uv run python main.py` to run.
-3. `uv run pytest` to confirm the 95 tests pass.
+3. `uv run pytest` to confirm the 131 tests pass.
 4. Outstanding housekeeping: optionally set a real `TELEGRAM_CHANNEL` (currently
    `me`); no git remote configured yet.
 
 ## Next
 
-Phase 4 is complete and **wired end-to-end** (a live signal runs
-parse→evaluate→store→execute as a dry run). Note for a live test today: it's the
-weekend and `AUTO_TRADING` defaults **off**, so the engine returns `NOT_TRADED`
-("Auto-trading disabled" / "Market closed") and nothing reaches the executor —
-set `AUTO_TRADING=true` and run inside market hours (or relax the hours) to see a
-`[DRY RUN]` execution.
+All phases (1–5) are complete and **wired end-to-end**. A live signal runs
+parse→evaluate→store→execute, and the executor is selected by `EXECUTION_MODE`:
+`dry_run` (validate + log, sends nothing) or `kite` (live Zerodha order).
 
-**Phase 5 = `KiteExecutor`**: implement `Executor` against Kite Connect (auth,
-order placement, error translation, real `broker_order_id`) and enable it with
-`EXECUTION_MODE=kite` — no change to the engine, listener, pipeline, or models.
-Do not implement until explicitly requested (per `CLAUDE.md`).
+**To trade live:** set `EXECUTION_MODE=kite` and supply `KITE_API_KEY`,
+`KITE_API_SECRET`, `KITE_ACCESS_TOKEN` (generate the daily access token yourself —
+the app does not log in). Also `AUTO_TRADING=true`, inside market hours. The
+engine gates everything before the executor, so off-hours / auto-trading-off →
+`NOT_TRADED` and nothing reaches Kite.
+
+Live orders now resolve to the exact Kite tradingsymbol (nearest weekly) via
+`KiteInstrumentResolver` — no manual symbol mapping needed.
+
+**Known follow-up (not started):**
+- **`BrokerLotSizeProvider`** — source lot sizes from the broker instrument master
+  instead of `.env`, behind the existing `LotSizeProvider` seam.
+  `KiteInstrumentResolver` already surfaces `lot_size`, so this is mostly wiring
+  (and sharing the cached instrument dump) — no engine change.

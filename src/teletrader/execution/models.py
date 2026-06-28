@@ -72,6 +72,12 @@ class OrderRequest:
     audit (and so a future bracket/SL order can use them). ``signal_id`` links
     the order back to the stored signal that produced it. This is a plain data
     carrier — validation lives in :mod:`teletrader.execution.validation`.
+
+    ``symbol`` is a human-readable display string (e.g. ``"NIFTY 23900 PE"``) used
+    for logs and the dry run. The structured ``underlying``/``strike``/
+    ``option_type`` fields carry the same option in machine-readable form so a
+    live executor can resolve the broker's exact tradingsymbol + expiry from them
+    (the :class:`~teletrader.execution.dry_run.DryRunExecutor` ignores them).
     """
 
     symbol: str
@@ -84,6 +90,10 @@ class OrderRequest:
     stop_loss: float | None = None
     target: float | None = None
     signal_id: int | None = None
+    # Structured option details for broker symbol resolution (live executor).
+    underlying: str | None = None
+    strike: int | None = None
+    option_type: str | None = None  # "CE" / "PE"
 
 
 @dataclass(frozen=True, slots=True)

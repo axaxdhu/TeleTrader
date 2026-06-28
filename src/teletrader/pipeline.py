@@ -61,11 +61,12 @@ def build_order_request(
 ) -> OrderRequest:
     """Map a signal + its trade decision to a broker-independent order request.
 
-    The symbol is a readable composition of the option's fields
-    (e.g. ``"NIFTY 23900 PE"``); a live executor (Phase 5) resolves that to the
-    broker's exact tradingsymbol/expiry. The breakout entry is sent as a
-    ``MARKET`` order, with the signal's entry/stop/target carried along for the
-    log and audit trail.
+    The ``symbol`` is a readable composition of the option's fields
+    (e.g. ``"NIFTY 23900 PE"``) for logs and the dry run; the structured
+    ``underlying``/``strike``/``option_type`` fields travel alongside it so the
+    live :class:`~teletrader.execution.kite.KiteExecutor` can resolve the broker's
+    exact tradingsymbol/expiry. The breakout entry is sent as a ``MARKET`` order,
+    with the signal's entry/stop/target carried along for the log and audit trail.
     """
     symbol = f"{signal.underlying} {signal.strike} {signal.option_type.value}"
     transaction_type = (
@@ -82,6 +83,9 @@ def build_order_request(
         stop_loss=signal.stop_loss,
         target=signal.target,
         signal_id=signal_id,
+        underlying=signal.underlying,
+        strike=signal.strike,
+        option_type=signal.option_type.value,
     )
 
 

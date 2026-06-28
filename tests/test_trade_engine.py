@@ -57,6 +57,9 @@ def _config(**overrides: object) -> Config:
         market_close=time(15, 30),
         market_timezone="Asia/Kolkata",
         execution_mode="dry_run",
+        kite_api_key=None,
+        kite_api_secret=None,
+        kite_access_token=None,
     )
     defaults.update(overrides)
     return Config(**defaults)  # type: ignore[arg-type]

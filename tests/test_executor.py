@@ -87,6 +87,9 @@ def _config(**overrides: object) -> Config:
         market_close=time(15, 30),
         market_timezone="Asia/Kolkata",
         execution_mode="dry_run",
+        kite_api_key=None,
+        kite_api_secret=None,
+        kite_access_token=None,
     )
     defaults.update(overrides)
     return Config(**defaults)  # type: ignore[arg-type]
@@ -183,9 +186,20 @@ def test_factory_builds_dry_run_executor(repo: ExecutionRepository) -> None:
     assert ex.mode == "dry_run"
 
 
-def test_factory_kite_mode_not_implemented_yet(repo: ExecutionRepository) -> None:
-    with pytest.raises(NotImplementedError):
-        create_executor(_config(execution_mode="kite"), repo)
+def test_factory_builds_kite_executor(repo: ExecutionRepository) -> None:
+    from teletrader.execution import KiteExecutor
+
+    ex = create_executor(
+        _config(
+            execution_mode="kite",
+            kite_api_key="k",
+            kite_api_secret="s",
+            kite_access_token="t",
+        ),
+        repo,
+    )
+    assert isinstance(ex, KiteExecutor)
+    assert ex.mode == "kite"
 
 
 def test_unknown_execution_mode_is_a_config_error(

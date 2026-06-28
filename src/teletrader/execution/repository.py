@@ -41,6 +41,7 @@ class StoredExecution:
     target: float | None
     status: ExecutionStatus
     remarks: str | None
+    broker_order_id: str | None = None
 
 
 class ExecutionRepository:
@@ -57,8 +58,8 @@ class ExecutionRepository:
                 """
                 INSERT INTO executions (
                     signal_id, timestamp, symbol, action, quantity, order_type,
-                    entry_price, stop_loss, target, status, remarks
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    entry_price, stop_loss, target, status, remarks, broker_order_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order.signal_id,
@@ -72,6 +73,7 @@ class ExecutionRepository:
                     order.target,
                     result.status.value,
                     result.remarks,
+                    result.broker_order_id,
                 ),
             )
         stored = self._row_to_stored(
@@ -126,4 +128,5 @@ class ExecutionRepository:
             target=row["target"],
             status=ExecutionStatus(row["status"]),
             remarks=row["remarks"],
+            broker_order_id=row["broker_order_id"],
         )

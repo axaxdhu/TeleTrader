@@ -10,7 +10,7 @@ never a broker SDK. Two implementations are interchangeable behind it::
         ▼
     Executor  (this interface)
         ├── DryRunExecutor   — validates + logs + records; submits nothing
-        └── KiteExecutor     — submits to Zerodha Kite (next phase)
+        └── KiteExecutor     — submits live orders to Zerodha Kite
 
 Selecting which one runs is pure configuration (``EXECUTION_MODE``); see
 :func:`teletrader.execution.factory.create_executor`. The interface is
