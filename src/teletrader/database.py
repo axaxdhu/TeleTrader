@@ -118,6 +118,29 @@ _MIGRATIONS: tuple[str, ...] = (
     DROP TABLE signals;
     ALTER TABLE signals_v4 RENAME TO signals;
     """,
+    # v5 — replace the (removed) paper-broker tables with an execution-history
+    # table. The project pivoted from a simulated broker to a thin order-execution
+    # layer (DryRunExecutor / future KiteExecutor); paper_orders/paper_positions
+    # are dropped, and `executions` records each execution *attempt* (the order as
+    # it would be / was submitted, and its verdict) — not market fills.
+    """
+    DROP TABLE IF EXISTS paper_orders;
+    DROP TABLE IF EXISTS paper_positions;
+    CREATE TABLE executions (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_id   INTEGER REFERENCES signals(id),
+        timestamp   TEXT    NOT NULL,
+        symbol      TEXT    NOT NULL,
+        action      TEXT    NOT NULL,
+        quantity    INTEGER NOT NULL,
+        order_type  TEXT    NOT NULL,
+        entry_price REAL,
+        stop_loss   REAL,
+        target      REAL,
+        status      TEXT    NOT NULL,
+        remarks     TEXT
+    );
+    """,
 )
 
 #: The schema version this build expects. Equals the number of migrations.

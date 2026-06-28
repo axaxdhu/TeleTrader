@@ -45,6 +45,8 @@ class Config:
     market_open: time
     market_close: time
     market_timezone: str
+    # --- Order execution (Phase 4) -------------------------------------------
+    execution_mode: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -79,6 +81,7 @@ class Config:
             market_open=_parse_time("MARKET_OPEN_TIME", default="09:15"),
             market_close=_parse_time("MARKET_CLOSE_TIME", default="15:30"),
             market_timezone=_parse_timezone("MARKET_TIMEZONE", default="Asia/Kolkata"),
+            execution_mode=_parse_execution_mode("EXECUTION_MODE", default="dry_run"),
         )
 
 
@@ -126,6 +129,20 @@ def _parse_int(name: str, *, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+#: Order-execution modes. ``dry_run`` validates + logs without sending; ``kite``
+#: (live) arrives in a later phase. Switching modes selects the executor.
+_EXECUTION_MODES = frozenset({"dry_run", "kite"})
+
+
+def _parse_execution_mode(name: str, *, default: str) -> str:
+    """Parse and validate ``EXECUTION_MODE`` against the known modes."""
+    value = os.getenv(name, default).strip().lower()
+    if value not in _EXECUTION_MODES:
+        allowed = ", ".join(sorted(_EXECUTION_MODES))
+        raise ConfigError(f"{name} must be one of {{{allowed}}}, got {value!r}")
+    return value
 
 
 def _parse_lot_sizes(name: str) -> Mapping[str, int]:

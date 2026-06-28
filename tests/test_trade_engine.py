@@ -56,6 +56,7 @@ def _config(**overrides: object) -> Config:
         market_open=time(9, 15),
         market_close=time(15, 30),
         market_timezone="Asia/Kolkata",
+        execution_mode="dry_run",
     )
     defaults.update(overrides)
     return Config(**defaults)  # type: ignore[arg-type]
@@ -152,6 +153,14 @@ def test_duplicate_signal_is_rejected(repo: SignalRepository) -> None:
 def test_duplicate_allowed_when_configured(repo: SignalRepository) -> None:
     repo.add(_signal(), created_at=TRADING_MOMENT)
     decision = _engine(repo, _config(allow_duplicates=True)).evaluate(_signal())
+    assert decision.execute is True
+
+
+def test_same_signal_on_a_later_day_is_not_a_duplicate(repo: SignalRepository) -> None:
+    # Stored yesterday; evaluating the same signal today is allowed (per-day dedupe).
+    yesterday = datetime(2026, 6, 25, 10, 0, tzinfo=IST)
+    repo.add(_signal(), created_at=yesterday)
+    decision = _engine(repo).evaluate(_signal())  # engine clock = TRADING_MOMENT (the 26th)
     assert decision.execute is True
 
 
