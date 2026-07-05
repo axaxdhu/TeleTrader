@@ -16,10 +16,12 @@ from teletrader.config import Config, ConfigError
 from teletrader.database import connect, initialize
 from teletrader.execution import ExecutionRepository, create_executor
 from teletrader.logging_config import configure_logging, get_logger
-from teletrader.pipeline import SignalPipeline
+from teletrader.pipeline import Channel2Pipeline, SignalPipeline
 from teletrader.repository import SignalRepository
-from teletrader.telegram_listener import TelegramListener
+from teletrader.telegram_listener import ChannelSubscription, TelegramListener
 from teletrader.trade_engine import TradeEngine
+from teletrader.trade_manager import TradeManager
+from teletrader.trade_repository import TradeRepository
 
 
 def main() -> int:
@@ -38,17 +40,46 @@ def main() -> int:
 
     # Persistence: dedupe is per trading day, so the signal repository needs the
     # market timezone to know when "today" rolls over.
-    signal_repository = SignalRepository(connection, tz=ZoneInfo(config.market_timezone))
+    market_tz = ZoneInfo(config.market_timezone)
+    signal_repository = SignalRepository(connection, tz=market_tz)
     execution_repository = ExecutionRepository(connection)
+    trade_repository = TradeRepository(connection, tz=market_tz)
 
     # Decision + execution: the engine decides; the configured executor submits
-    # (a dry run unless EXECUTION_MODE=kite). The pipeline glues the stages.
+    # (a dry run unless EXECUTION_MODE=kite). The trade manager applies management
+    # commands (avoid / book profit / move SL) to active trades. The pipeline
+    # glues the stages.
     engine = TradeEngine(config, signal_repository)
     executor = create_executor(config, execution_repository)
-    pipeline = SignalPipeline(signal_repository, engine, executor)
+    trade_manager = TradeManager(trade_repository, executor)
+    pipeline = SignalPipeline(signal_repository, engine, trade_manager)
     logger.info("Execution mode: %s", config.execution_mode)
 
-    listener = TelegramListener(config, pipeline)
+    # One subscription per enabled channel. Channel 1 is the full trading
+    # pipeline; channel 2 (optional) is parse-only, storing into its own
+    # source-scoped repository so its signals never mix with channel 1's history.
+    subscriptions: list[ChannelSubscription] = []
+    if config.channel_1_enabled:
+        subscriptions.append(ChannelSubscription("channel1", config.channel, pipeline))
+    if config.channel_2 is not None and config.channel_2_enabled:
+        channel2_repository = SignalRepository(
+            connection, tz=market_tz, source="channel2"
+        )
+        subscriptions.append(
+            ChannelSubscription(
+                "channel2", config.channel_2, Channel2Pipeline(channel2_repository)
+            )
+        )
+
+    if not subscriptions:
+        print(
+            "No channels enabled: set CHANNEL_1_ENABLED / CHANNEL_2_ENABLED "
+            "(and TELEGRAM_CHANNEL_2 for the second channel).",
+            file=sys.stderr,
+        )
+        return 1
+
+    listener = TelegramListener(config, subscriptions)
     try:
         asyncio.run(listener.run())
     except KeyboardInterrupt:

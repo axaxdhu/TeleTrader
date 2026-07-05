@@ -20,7 +20,15 @@ from typing import Callable
 from ..logging_config import get_logger
 from .base import Executor
 from .exceptions import InvalidOrderError
-from .models import ExecutionResult, ExecutionStatus, OrderRequest
+from .models import (
+    ExecutionResult,
+    ExecutionStatus,
+    ManagementAction,
+    ManagementResult,
+    OrderRequest,
+    OrderState,
+    OrderStatus,
+)
 from .repository import ExecutionRepository
 from .validation import validate_order
 
@@ -86,6 +94,65 @@ class DryRunExecutor(Executor):
         self._log(result)
         self._repository.add(result)
         return result
+
+    # --- Management operations (logged only; nothing is sent) -----------------
+
+    def cancel_order(
+        self, broker_order_id: str | None, *, symbol: str | None = None
+    ) -> ManagementResult:
+        logger.info(
+            "[DRY RUN] Would CANCEL order %s%s",
+            broker_order_id or "(no live order)",
+            f" for {symbol}" if symbol else "",
+        )
+        return ManagementResult(
+            action=ManagementAction.CANCEL,
+            status=ExecutionStatus.SUCCESS,
+            remarks="Order would have been cancelled.",
+            timestamp=self._clock(),
+        )
+
+    def modify_stop_loss(
+        self, broker_order_id: str | None, new_trigger: float, *, symbol: str | None = None
+    ) -> ManagementResult:
+        return self._log_modify(
+            ManagementAction.MODIFY_STOP_LOSS, "stop-loss", broker_order_id, new_trigger, symbol
+        )
+
+    def modify_target(
+        self, broker_order_id: str | None, new_price: float, *, symbol: str | None = None
+    ) -> ManagementResult:
+        return self._log_modify(
+            ManagementAction.MODIFY_TARGET, "target", broker_order_id, new_price, symbol
+        )
+
+    def get_order_state(self, broker_order_id: str | None) -> OrderState:
+        # A dry run places nothing, so there is no real order to poll. Report
+        # COMPLETE so the protected-entry orchestration proceeds end-to-end (the
+        # trade opens with no broker ids; OCO reconciliation skips id-less trades).
+        return OrderState(OrderStatus.COMPLETE, raw="dry-run")
+
+    def _log_modify(
+        self,
+        action: ManagementAction,
+        what: str,
+        broker_order_id: str | None,
+        new_value: float,
+        symbol: str | None,
+    ) -> ManagementResult:
+        logger.info(
+            "[DRY RUN] Would MODIFY %s to %s (order %s)%s",
+            what,
+            _fmt(new_value),
+            broker_order_id or "(no live order)",
+            f" for {symbol}" if symbol else "",
+        )
+        return ManagementResult(
+            action=action,
+            status=ExecutionStatus.SUCCESS,
+            remarks=f"{what.capitalize()} would have been moved to {_fmt(new_value)}.",
+            timestamp=self._clock(),
+        )
 
     @staticmethod
     def _log(result: ExecutionResult) -> None:

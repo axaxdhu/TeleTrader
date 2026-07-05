@@ -147,6 +147,49 @@ _MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE executions ADD COLUMN broker_order_id TEXT;
     """,
+    # v7 — active-trade state for trade-management commands (avoid / book profit /
+    # move SL). A `trades` row is the live position opened by an executed entry
+    # signal; management messages act on the most recent active one. The broker
+    # order ids and resolved tradingsymbol are nullable — filled in once the live
+    # executor places/fills the entry and its protective orders (Phase 2); a
+    # dry run leaves them NULL.
+    """
+    CREATE TABLE trades (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_id       INTEGER REFERENCES signals(id),
+        underlying      TEXT    NOT NULL,
+        strike          INTEGER NOT NULL,
+        option_type     TEXT    NOT NULL,
+        tradingsymbol   TEXT,
+        quantity        INTEGER NOT NULL,
+        status          TEXT    NOT NULL,
+        entry_price     REAL,
+        stop_loss       REAL,
+        target          REAL,
+        entry_order_id  TEXT,
+        sl_order_id     TEXT,
+        target_order_id TEXT,
+        created_at      TEXT    NOT NULL,
+        updated_at      TEXT    NOT NULL
+    );
+    CREATE INDEX idx_trades_status ON trades(status);
+    """,
+    # v8 — multi-channel: tag each signal with the channel it came from so per
+    # channel storage, dedupe, and counting stay isolated (a second signal source
+    # was added — see `channel2`). A plain ADD COLUMN is used (not a table rebuild)
+    # because `executions`/`trades` now hold foreign keys into `signals`, and
+    # dropping the parent table would violate them. Existing rows predate the
+    # second channel, so they backfill to 'channel1'.
+    #
+    # Note: the day-scoped UNIQUE(message_hash, trade_date) is intentionally left
+    # channel-agnostic. Each channel still dedupes within itself; the only edge
+    # case is two channels posting an identically-hashing signal on the same day
+    # (the second is treated as a duplicate). That is vanishingly rare given the
+    # channels' different instruments/formats, and harmless for a parse-only
+    # channel — a per-channel unique key would require the unsafe rebuild above.
+    """
+    ALTER TABLE signals ADD COLUMN source TEXT NOT NULL DEFAULT 'channel1';
+    """,
 )
 
 #: The schema version this build expects. Equals the number of migrations.

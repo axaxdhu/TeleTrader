@@ -54,6 +54,13 @@ class Config:
     kite_api_key: str | None
     kite_api_secret: str | None
     kite_access_token: str | None
+    # --- Second signal channel (parse-only) ----------------------------------
+    # An optional second channel whose messages are parsed and stored but not
+    # traded (see teletrader.channel2). Each channel can be enabled/disabled
+    # independently; a channel with no id configured is simply not listened to.
+    channel_2: int | str | None = None
+    channel_1_enabled: bool = True
+    channel_2_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -92,6 +99,9 @@ class Config:
             market_timezone=_parse_timezone("MARKET_TIMEZONE", default="Asia/Kolkata"),
             execution_mode=execution_mode,
             **_parse_kite_credentials(execution_mode),
+            channel_2=_parse_optional_channel("TELEGRAM_CHANNEL_2"),
+            channel_1_enabled=_parse_bool("CHANNEL_1_ENABLED", default=True),
+            channel_2_enabled=_parse_bool("CHANNEL_2_ENABLED", default=True),
         )
 
 
@@ -107,6 +117,18 @@ def _parse_channel(value: str) -> int | str:
     if candidate.lstrip("-").isdigit():
         return int(candidate)
     return candidate
+
+
+def _parse_optional_channel(name: str) -> int | str | None:
+    """Parse an *optional* channel identifier env var (``None`` when unset).
+
+    Same numeric-vs-username coercion as :func:`_parse_channel`, but the variable
+    is not required — an absent second channel simply means it is not listened to.
+    """
+    value = os.getenv(name)
+    if not value or not value.strip():
+        return None
+    return _parse_channel(value)
 
 
 def _require(name: str) -> str:

@@ -31,7 +31,9 @@ from teletrader.execution import (
     Executor,
     InstrumentNotFoundError,
     KiteExecutor,
+    ManagementAction,
     OrderRequest,
+    OrderStatus,
     OrderType,
     ProductType,
     ResolvedInstrument,
@@ -54,12 +56,29 @@ RESOLVED = ResolvedInstrument(
 
 
 class FakeKite:
-    """A stand-in Kite client: returns an order id or raises a chosen error."""
+    """A stand-in Kite client: returns an order id or raises a chosen error.
 
-    def __init__(self, *, order_id: str | None = None, error: Exception | None = None) -> None:
+    Also records modify/cancel calls and can replay a fixed ``order_history`` so
+    the management ops and fill/OCO status lookups can be exercised offline.
+    """
+
+    def __init__(
+        self,
+        *,
+        order_id: str | None = None,
+        error: Exception | None = None,
+        history: list[dict[str, object]] | None = None,
+        modify_error: Exception | None = None,
+        cancel_error: Exception | None = None,
+    ) -> None:
         self._order_id = order_id
         self._error = error
+        self._history = history
+        self._modify_error = modify_error
+        self._cancel_error = cancel_error
         self.calls: list[dict[str, object]] = []
+        self.modified: list[dict[str, object]] = []
+        self.cancelled: list[dict[str, object]] = []
 
     def place_order(self, **params: object) -> str:
         self.calls.append(params)
@@ -67,6 +86,23 @@ class FakeKite:
             raise self._error
         assert self._order_id is not None
         return self._order_id
+
+    def modify_order(self, **params: object) -> str:
+        self.modified.append(params)
+        if self._modify_error is not None:
+            raise self._modify_error
+        return str(params.get("order_id"))
+
+    def cancel_order(self, **params: object) -> str:
+        self.cancelled.append(params)
+        if self._cancel_error is not None:
+            raise self._cancel_error
+        return str(params.get("order_id"))
+
+    def order_history(self, order_id: str) -> list[dict[str, object]]:
+        if self._history is None:
+            return []
+        return self._history
 
 
 class FakeResolver:
@@ -430,6 +466,109 @@ def test_trade_engine_has_no_kite_dependency() -> None:
 
     source = inspect.getsource(engine_module)
     assert "kite" not in source.lower()
+
+
+# --- Protective SL-M order translation ----------------------------------------
+
+
+def test_sl_m_order_includes_trigger_price(repo: ExecutionRepository) -> None:
+    kite = FakeKite(order_id="SL1")
+    sl_order = _order(
+        transaction_type=TransactionType.SELL,
+        order_type=OrderType.SL_M,
+        entry_price=None,
+        stop_loss=None,
+        target=None,
+        trigger_price=150.0,
+    )
+    result = _executor(repo, kite).execute(sl_order)
+
+    assert result.status is ExecutionStatus.SUCCESS
+    (params,) = kite.calls
+    assert params["order_type"] == "SL-M"
+    assert params["trigger_price"] == 150.0
+    assert params["transaction_type"] == "SELL"
+    assert "price" not in params
+
+
+# --- Order state (fill detection + OCO) ---------------------------------------
+
+
+def test_get_order_state_maps_complete_with_fill(repo: ExecutionRepository) -> None:
+    kite = FakeKite(history=[{"status": "COMPLETE", "average_price": 165.5, "filled_quantity": 65}])
+    state = _executor(repo, kite).get_order_state("OID")
+    assert state.status is OrderStatus.COMPLETE
+    assert state.is_filled
+    assert state.average_price == 165.5
+    assert state.filled_quantity == 65
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("OPEN", OrderStatus.PENDING),
+        ("TRIGGER PENDING", OrderStatus.PENDING),
+        ("REJECTED", OrderStatus.REJECTED),
+        ("CANCELLED", OrderStatus.CANCELLED),
+    ],
+)
+def test_get_order_state_maps_status(repo: ExecutionRepository, raw: str, expected) -> None:
+    kite = FakeKite(history=[{"status": raw}])
+    assert _executor(repo, kite).get_order_state("OID").status is expected
+
+
+def test_get_order_state_unknown_for_missing_or_empty(repo: ExecutionRepository) -> None:
+    ex = _executor(repo, FakeKite(history=[]))
+    assert ex.get_order_state("OID").status is OrderStatus.UNKNOWN
+    assert ex.get_order_state(None).status is OrderStatus.UNKNOWN
+
+
+def test_get_order_state_never_raises(repo: ExecutionRepository) -> None:
+    # A lookup failure degrades to UNKNOWN rather than crashing the caller.
+    class Boom(FakeKite):
+        def order_history(self, order_id: str) -> list[dict[str, object]]:
+            raise NetworkException("down", code=503)
+
+    assert _executor(repo, Boom()).get_order_state("OID").status is OrderStatus.UNKNOWN
+
+
+# --- Cancel / modify (management ops) -----------------------------------------
+
+
+def test_cancel_order_calls_kite(repo: ExecutionRepository) -> None:
+    kite = FakeKite()
+    result = _executor(repo, kite).cancel_order("OID", symbol="NIFTY 23900 PE")
+    assert result.action is ManagementAction.CANCEL
+    assert result.succeeded
+    assert kite.cancelled == [{"variety": "regular", "order_id": "OID"}]
+
+
+def test_cancel_order_without_id_fails(repo: ExecutionRepository) -> None:
+    result = _executor(repo, FakeKite()).cancel_order(None)
+    assert not result.succeeded
+    assert "No broker order id" in result.remarks
+
+
+def test_cancel_order_translates_broker_error(repo: ExecutionRepository) -> None:
+    kite = FakeKite(cancel_error=OrderException("order is not open"))
+    result = _executor(repo, kite).cancel_order("OID")
+    assert not result.succeeded
+
+
+def test_modify_stop_loss_calls_kite(repo: ExecutionRepository) -> None:
+    kite = FakeKite()
+    result = _executor(repo, kite).modify_stop_loss("SL1", 165.0)
+    assert result.action is ManagementAction.MODIFY_STOP_LOSS
+    assert result.succeeded
+    assert kite.modified == [{"variety": "regular", "order_id": "SL1", "trigger_price": 165.0}]
+
+
+def test_modify_target_calls_kite(repo: ExecutionRepository) -> None:
+    kite = FakeKite()
+    result = _executor(repo, kite).modify_target("TG1", 250.0)
+    assert result.action is ManagementAction.MODIFY_TARGET
+    assert result.succeeded
+    assert kite.modified == [{"variety": "regular", "order_id": "TG1", "price": 250.0}]
 
 
 def test_importing_decision_layer_does_not_load_kite_sdk() -> None:

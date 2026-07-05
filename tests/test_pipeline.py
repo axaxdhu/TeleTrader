@@ -31,6 +31,8 @@ from teletrader.pipeline import (
 )
 from teletrader.repository import SignalRepository
 from teletrader.trade_engine import TradeDecision, TradeEngine
+from teletrader.trade_manager import TradeManager
+from teletrader.trade_repository import TradeRepository, TradeStatus
 
 IST = ZoneInfo("Asia/Kolkata")
 # A Friday, 10:00 IST — a weekday inside the default 09:15–15:30 window.
@@ -78,7 +80,12 @@ def _pipeline(connection: sqlite3.Connection, config: Config | None = None) -> S
     signal_repo = SignalRepository(connection, tz=timezone.utc)
     engine = TradeEngine(config, signal_repo, clock=lambda: TRADING_MOMENT)
     executor = DryRunExecutor(ExecutionRepository(connection), clock=lambda: TRADING_MOMENT)
-    return SignalPipeline(signal_repo, engine, executor)
+    trade_manager = TradeManager(
+        TradeRepository(connection, tz=timezone.utc),
+        executor,
+        clock=lambda: TRADING_MOMENT,
+    )
+    return SignalPipeline(signal_repo, engine, trade_manager)
 
 
 # --- The four outcomes --------------------------------------------------------
@@ -97,11 +104,15 @@ def test_valid_signal_is_stored_and_executed(connection: sqlite3.Connection) -> 
     assert result.decision is not None and result.decision.execute is True
     assert result.execution is not None
     assert result.execution.status is ExecutionStatus.SUCCESS
-    # The execution attempt was recorded and linked back to the stored signal.
+    # Three attempts were recorded and linked to the signal: the BUY entry plus
+    # the two resting protective exits (SL-M + target LIMIT), all SELL.
     executions = ExecutionRepository(connection).list_all()
-    assert len(executions) == 1
-    assert executions[0].signal_id == 1
+    assert len(executions) == 3
+    assert all(e.signal_id == 1 for e in executions)
+    assert executions[0].action is TransactionType.BUY
     assert executions[0].quantity == 65  # 1 lot x NIFTY lot size
+    assert [e.action for e in executions[1:]] == [TransactionType.SELL, TransactionType.SELL]
+    assert {e.order_type for e in executions[1:]} == {OrderType.SL_M, OrderType.LIMIT}
 
 
 def test_duplicate_same_day_is_reported(connection: sqlite3.Connection) -> None:
@@ -109,8 +120,8 @@ def test_duplicate_same_day_is_reported(connection: sqlite3.Connection) -> None:
     pipeline.process(SIGNAL_TEXT, when=TRADING_MOMENT)
     again = pipeline.process(SIGNAL_TEXT, when=TRADING_MOMENT)
     assert again.status is PipelineStatus.DUPLICATE
-    # No second execution attempt was made.
-    assert ExecutionRepository(connection).count() == 1
+    # No second batch of orders was placed (the first entry placed 3: entry + 2 exits).
+    assert ExecutionRepository(connection).count() == 3
 
 
 def test_signal_not_traded_when_auto_trading_off(connection: sqlite3.Connection) -> None:
@@ -122,6 +133,50 @@ def test_signal_not_traded_when_auto_trading_off(connection: sqlite3.Connection)
     assert result.decision is not None and "Auto-trading disabled" in result.decision.reason
     # The engine declined, so nothing reached the executor.
     assert ExecutionRepository(connection).count() == 0
+
+
+# --- Management commands end-to-end -------------------------------------------
+
+
+def test_executed_signal_opens_an_active_trade(connection: sqlite3.Connection) -> None:
+    _pipeline(connection).process(SIGNAL_TEXT, when=TRADING_MOMENT)
+    trade = TradeRepository(connection).most_recent_active()
+    assert trade is not None
+    assert trade.status is TradeStatus.OPEN
+    assert trade.quantity == 65
+    assert trade.entry_price == 165.0  # the "cost" a later move-SL refers to
+
+
+def test_command_with_no_active_trade_reports_no_target(
+    connection: sqlite3.Connection,
+) -> None:
+    result = _pipeline(connection).process("MODIFY SL TO COST")
+    assert result.status is PipelineStatus.NO_TARGET
+    assert result.command is not None
+    assert result.signal is None
+
+
+def test_book_profit_exits_the_open_trade(connection: sqlite3.Connection) -> None:
+    pipeline = _pipeline(connection)
+    pipeline.process(SIGNAL_TEXT, when=TRADING_MOMENT)
+
+    result = pipeline.process("SAFE TRADERS BOOK PROFIT", when=TRADING_MOMENT)
+    assert result.status is PipelineStatus.EXITED
+    # The trade is closed and a SELL exit order was recorded.
+    assert TradeRepository(connection).most_recent_active() is None
+    executions = ExecutionRepository(connection).list_all()
+    assert executions[-1].action is TransactionType.SELL
+    assert executions[-1].quantity == 65
+
+
+def test_move_sl_to_cost_updates_the_trade(connection: sqlite3.Connection) -> None:
+    pipeline = _pipeline(connection)
+    pipeline.process(SIGNAL_TEXT, when=TRADING_MOMENT)
+
+    result = pipeline.process("MODIFY SL TO COST", when=TRADING_MOMENT)
+    assert result.status is PipelineStatus.MODIFIED
+    trade = TradeRepository(connection).get(1)
+    assert trade.stop_loss == 165.0  # moved to entry/cost (was 150)
 
 
 # --- Signal -> OrderRequest mapping -------------------------------------------

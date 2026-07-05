@@ -21,6 +21,7 @@ from .logging_config import get_logger
 from .parser import Action, OptionType, Signal
 
 __all__ = [
+    "DEFAULT_SOURCE",
     "DuplicateSignalError",
     "SignalRepository",
     "StoredSignal",
@@ -28,6 +29,11 @@ __all__ = [
 ]
 
 logger = get_logger(__name__)
+
+#: Default channel tag for signals (the original, single-channel source). A
+#: repository can be bound to a different source (e.g. ``"channel2"``) to keep
+#: each channel's storage, dedupe, and counting isolated from the others.
+DEFAULT_SOURCE = "channel1"
 
 
 class DuplicateSignalError(Exception):
@@ -50,6 +56,7 @@ class StoredSignal:
     message_hash: str
     created_at: datetime
     signal: Signal
+    source: str = DEFAULT_SOURCE
 
 
 def signal_hash(signal: Signal) -> str:
@@ -91,13 +98,24 @@ class SignalRepository:
     only if already stored on the same date, and is accepted again on a later
     day. The day is derived in ``tz`` (inject the market timezone so "day" means
     the trading day, not a UTC day); it defaults to UTC.
+
+    The repository is **source-scoped**: it stores and queries only rows for its
+    ``source`` channel, so each channel's storage, dedupe, and counting are
+    isolated. Bind one repository per channel (``source="channel1"`` /
+    ``"channel2"``); the trade engine's daily-count and duplicate checks then see
+    only that channel's history.
     """
 
     def __init__(
-        self, connection: sqlite3.Connection, *, tz: tzinfo = timezone.utc
+        self,
+        connection: sqlite3.Connection,
+        *,
+        tz: tzinfo = timezone.utc,
+        source: str = DEFAULT_SOURCE,
     ) -> None:
         self._connection = connection
         self._tz = tz
+        self._source = source
 
     def add(self, signal: Signal, *, created_at: datetime | None = None) -> StoredSignal:
         """Persist ``signal`` and return the :class:`StoredSignal` row.
@@ -121,8 +139,8 @@ class SignalRepository:
                     INSERT INTO signals (
                         message_hash, underlying, strike, option_type, action,
                         entry_price, stop_loss, target, target_open_ended,
-                        raw_text, created_at, trade_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        raw_text, created_at, trade_date, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         message_hash,
@@ -137,6 +155,7 @@ class SignalRepository:
                         signal.raw_text,
                         created_at.isoformat(),
                         trade_date,
+                        self._source,
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -151,8 +170,15 @@ class SignalRepository:
             message_hash=message_hash,
             created_at=created_at,
             signal=signal,
+            source=self._source,
         )
-        logger.info("Stored signal id=%s (date=%s): %s", stored.id, trade_date, signal)
+        logger.info(
+            "Stored signal id=%s (source=%s date=%s): %s",
+            stored.id,
+            self._source,
+            trade_date,
+            signal,
+        )
         return stored
 
     def exists(self, signal: Signal, *, on_date: date | None = None) -> bool:
@@ -164,8 +190,9 @@ class SignalRepository:
         """
         target_date = (on_date or datetime.now(self._tz).date()).isoformat()
         row = self._connection.execute(
-            "SELECT 1 FROM signals WHERE message_hash = ? AND trade_date = ? LIMIT 1",
-            (signal_hash(signal), target_date),
+            "SELECT 1 FROM signals "
+            "WHERE message_hash = ? AND trade_date = ? AND source = ? LIMIT 1",
+            (signal_hash(signal), target_date, self._source),
         ).fetchone()
         return row is not None
 
@@ -177,20 +204,23 @@ class SignalRepository:
         return _row_to_stored(row) if row is not None else None
 
     def list_all(self) -> list[StoredSignal]:
-        """Return every stored signal, oldest first."""
+        """Return every stored signal for this source, oldest first."""
         rows = self._connection.execute(
-            "SELECT * FROM signals ORDER BY id ASC"
+            "SELECT * FROM signals WHERE source = ? ORDER BY id ASC",
+            (self._source,),
         ).fetchall()
         return [_row_to_stored(row) for row in rows]
 
     def count(self) -> int:
-        """Return the number of stored signals."""
+        """Return the number of stored signals for this source."""
         return int(
-            self._connection.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+            self._connection.execute(
+                "SELECT COUNT(*) FROM signals WHERE source = ?", (self._source,)
+            ).fetchone()[0]
         )
 
     def count_since(self, moment: datetime) -> int:
-        """Return how many signals were stored at or after ``moment``.
+        """Return how many signals for this source were stored at or after ``moment``.
 
         ``moment`` is normalised to UTC to match the stored ISO-8601 UTC
         ``created_at`` strings (which compare lexicographically). Used by the
@@ -198,8 +228,8 @@ class SignalRepository:
         """
         boundary = moment.astimezone(timezone.utc).isoformat()
         row = self._connection.execute(
-            "SELECT COUNT(*) FROM signals WHERE created_at >= ?",
-            (boundary,),
+            "SELECT COUNT(*) FROM signals WHERE source = ? AND created_at >= ?",
+            (self._source, boundary),
         ).fetchone()
         return int(row[0])
 
@@ -222,4 +252,5 @@ def _row_to_stored(row: sqlite3.Row) -> StoredSignal:
         message_hash=row["message_hash"],
         created_at=datetime.fromisoformat(row["created_at"]),
         signal=signal,
+        source=row["source"],
     )

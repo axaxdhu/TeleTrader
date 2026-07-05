@@ -20,9 +20,11 @@ from teletrader.execution import (
     DryRunExecutor,
     ExecutionError,
     ExecutionRepository,
+    ExecutionResult,
     ExecutionStatus,
     Executor,
     InvalidOrderError,
+    ManagementAction,
     OrderRequest,
     OrderType,
     TransactionType,
@@ -52,6 +54,47 @@ def repo(connection: sqlite3.Connection) -> ExecutionRepository:
 @pytest.fixture
 def executor(repo: ExecutionRepository) -> DryRunExecutor:
     return DryRunExecutor(repo, clock=lambda: NOW)
+
+
+# --- Management operations ----------------------------------------------------
+
+
+def test_dry_run_cancel_order_succeeds(executor: DryRunExecutor) -> None:
+    result = executor.cancel_order("OID1", symbol="NIFTY 23900 PE")
+    assert result.action is ManagementAction.CANCEL
+    assert result.status is ExecutionStatus.SUCCESS
+    assert result.succeeded
+
+
+def test_dry_run_modify_stop_loss_succeeds(executor: DryRunExecutor) -> None:
+    result = executor.modify_stop_loss("SL1", 165.0, symbol="NIFTY 23900 PE")
+    assert result.action is ManagementAction.MODIFY_STOP_LOSS
+    assert result.succeeded
+    assert "165" in result.remarks
+
+
+def test_dry_run_modify_target_succeeds(executor: DryRunExecutor) -> None:
+    result = executor.modify_target("TG1", 250.0)
+    assert result.action is ManagementAction.MODIFY_TARGET
+    assert result.succeeded
+
+
+def test_base_executor_management_ops_default_to_unsupported() -> None:
+    """An executor that doesn't override the management ops fails cleanly."""
+
+    class BareExecutor(Executor):
+        @property
+        def mode(self) -> str:
+            return "bare"
+
+        def execute(self, order: OrderRequest) -> ExecutionResult:  # pragma: no cover
+            raise NotImplementedError
+
+    bare = BareExecutor()
+    result = bare.cancel_order("OID1")
+    assert result.status is ExecutionStatus.FAILED
+    assert "not supported" in result.remarks
+    assert "bare" in result.remarks
 
 
 def _order(**overrides: object) -> OrderRequest:

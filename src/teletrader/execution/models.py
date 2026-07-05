@@ -19,7 +19,11 @@ from enum import Enum
 __all__ = [
     "ExecutionResult",
     "ExecutionStatus",
+    "ManagementAction",
+    "ManagementResult",
     "OrderRequest",
+    "OrderState",
+    "OrderStatus",
     "OrderType",
     "ProductType",
     "TransactionType",
@@ -34,10 +38,16 @@ class TransactionType(str, Enum):
 
 
 class OrderType(str, Enum):
-    """How the order is priced (broker-neutral spellings; adapters translate)."""
+    """How the order is priced (broker-neutral spellings; adapters translate).
+
+    ``SL_M`` is a stop-loss-market order: it rests until the market reaches
+    ``trigger_price`` and then executes at market. It is the protective stop placed
+    after an entry fills.
+    """
 
     MARKET = "MARKET"
     LIMIT = "LIMIT"
+    SL_M = "SL-M"
 
 
 class ProductType(str, Enum):
@@ -89,6 +99,7 @@ class OrderRequest:
     entry_price: float | None = None
     stop_loss: float | None = None
     target: float | None = None
+    trigger_price: float | None = None  # the trigger for an SL-M order
     signal_id: int | None = None
     # Structured option details for broker symbol resolution (live executor).
     underlying: str | None = None
@@ -115,3 +126,77 @@ class ExecutionResult:
     @property
     def succeeded(self) -> bool:
         return self.status is ExecutionStatus.SUCCESS
+
+
+class ManagementAction(str, Enum):
+    """A broker operation on an *existing* order/position (vs placing a new one).
+
+    These back the trade-management commands: cancelling a not-yet-filled entry,
+    or moving a resting stop-loss/target. (Booking profit is an ordinary exit
+    order and uses :meth:`~teletrader.execution.base.Executor.execute`.)
+    """
+
+    CANCEL = "CANCEL"
+    MODIFY_STOP_LOSS = "MODIFY_STOP_LOSS"
+    MODIFY_TARGET = "MODIFY_TARGET"
+
+
+@dataclass(frozen=True, slots=True)
+class ManagementResult:
+    """The outcome of a management operation (cancel / modify).
+
+    Mirrors :class:`ExecutionResult` but carries no :class:`OrderRequest` — a
+    cancel/modify acts on an order that already exists rather than submitting a
+    new one. ``broker_order_id`` echoes the affected order when known (``None`` for
+    a dry run, which touches no broker).
+    """
+
+    action: ManagementAction
+    status: ExecutionStatus
+    remarks: str
+    broker_order_id: str | None = None
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status is ExecutionStatus.SUCCESS
+
+
+class OrderStatus(str, Enum):
+    """The live state of a placed order at the broker (broker-neutral).
+
+    Drives two things: fill detection (has the entry reached ``COMPLETE``?) and
+    OCO reconciliation (did a resting stop/target fill, so its sibling must be
+    cancelled?). ``UNKNOWN`` covers "could not determine" — the safe non-terminal
+    default so nothing is treated as filled by mistake.
+    """
+
+    PENDING = "PENDING"      # accepted/open/trigger-pending — not yet done
+    COMPLETE = "COMPLETE"    # fully filled
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+    UNKNOWN = "UNKNOWN"
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether the order has reached a final state (no longer working)."""
+        return self in (OrderStatus.COMPLETE, OrderStatus.CANCELLED, OrderStatus.REJECTED)
+
+
+@dataclass(frozen=True, slots=True)
+class OrderState:
+    """A snapshot of a placed order's broker state.
+
+    ``average_price`` / ``filled_quantity`` are populated for a filled order (so a
+    protective stop can be sized to the actual fill). ``raw`` keeps the broker's
+    own status string for logs/debugging.
+    """
+
+    status: OrderStatus
+    average_price: float | None = None
+    filled_quantity: int | None = None
+    raw: str = ""
+
+    @property
+    def is_filled(self) -> bool:
+        return self.status is OrderStatus.COMPLETE

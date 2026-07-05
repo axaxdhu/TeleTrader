@@ -22,7 +22,15 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from .models import ExecutionResult, OrderRequest
+from .models import (
+    ExecutionResult,
+    ExecutionStatus,
+    ManagementAction,
+    ManagementResult,
+    OrderRequest,
+    OrderState,
+    OrderStatus,
+)
 
 __all__ = ["Executor"]
 
@@ -49,3 +57,45 @@ class Executor(ABC):
         may raise an :class:`~teletrader.execution.exceptions.ExecutionError`
         subclass if the broker call itself fails.
         """
+
+    # --- Management operations on an existing order/position ------------------
+    # These act on a trade that already exists (trade-management commands). They
+    # are optional: the default raises nothing and reports ``FAILED`` ("not
+    # supported in this mode") so an executor that has no live broker behind it
+    # (or has not implemented them yet) degrades cleanly rather than crashing.
+    # Booking profit is *not* here — it is an ordinary exit order via ``execute``.
+
+    def cancel_order(
+        self, broker_order_id: str | None, *, symbol: str | None = None
+    ) -> ManagementResult:
+        """Cancel a not-yet-filled order (e.g. to avoid a pending entry)."""
+        return self._unsupported(ManagementAction.CANCEL)
+
+    def modify_stop_loss(
+        self, broker_order_id: str | None, new_trigger: float, *, symbol: str | None = None
+    ) -> ManagementResult:
+        """Move a resting stop-loss order's trigger to ``new_trigger``."""
+        return self._unsupported(ManagementAction.MODIFY_STOP_LOSS)
+
+    def modify_target(
+        self, broker_order_id: str | None, new_price: float, *, symbol: str | None = None
+    ) -> ManagementResult:
+        """Move a resting target order's price to ``new_price``."""
+        return self._unsupported(ManagementAction.MODIFY_TARGET)
+
+    def get_order_state(self, broker_order_id: str | None) -> OrderState:
+        """Return the live broker state of a placed order.
+
+        Used for fill detection (did the entry reach ``COMPLETE``?) and OCO
+        reconciliation (did a resting stop/target fill?). The default reports
+        ``UNKNOWN`` — the safe non-terminal value, so an executor with no live
+        broker behind it never causes a position to be treated as filled/closed.
+        """
+        return OrderState(OrderStatus.UNKNOWN, raw="not supported")
+
+    def _unsupported(self, action: ManagementAction) -> ManagementResult:
+        return ManagementResult(
+            action=action,
+            status=ExecutionStatus.FAILED,
+            remarks=f"{action.value} is not supported in '{self.mode}' mode",
+        )

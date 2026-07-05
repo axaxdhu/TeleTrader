@@ -12,6 +12,9 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | —     | Trade engine (decision layer)     | ✅ Done (15 tests) |
 | 4     | Execution layer + live wiring     | ✅ Done (28 tests) |
 | 5     | Live broker integration (KiteExecutor) | ✅ Done (22 tests) |
+| —     | Trade-management commands (Phase 1: parse + state + dry-run) | ✅ Done |
+| —     | Trade-management commands (Phase 2: live Kite — protection, fill, OCO) | ✅ Done (229 total) |
+| —     | Second channel (parse-only) + per-channel switches | ✅ Done (253 total) |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
 > The trade engine is the broker-agnostic decision layer (it *decides*, it does
@@ -127,21 +130,24 @@ no broker integration (kept strictly to phase scope).
 ### Project structure (updated)
 
 ```
-main.py                         # config → connect/initialize → repo → listener
+main.py                         # config → connect/initialize → repos → listener
 src/teletrader/
   config.py                     # + database_path (DATABASE_PATH env)
   database.py                   # NEW — connect() + migrations (user_version)
   repository.py                 # NEW — SignalRepository, StoredSignal, signal_hash
   parser.py                     # Phase 2 (unchanged)
+  commands.py                   # NEW — ManagementCommand parser + parse_message()
   telegram_listener.py          # Telegram I/O only → SignalPipeline
-  pipeline.py                   # SignalPipeline: parse→evaluate→store→execute
+  pipeline.py                   # SignalPipeline: parse→evaluate→store→execute / command→manage
   logging_config.py
   trade_engine.py               # decision layer
+  trade_manager.py              # NEW — applies management commands to active trades
+  trade_repository.py           # NEW — TradeRepository, StoredTrade (active-trade state)
   lot_size.py                   # LotSizeProvider seam
   execution/                    # order execution layer (broker-independent)
     __init__.py                 #   re-exports public surface
-    base.py                     #   abstract Executor
-    models.py                   #   OrderRequest, ExecutionResult, enums
+    base.py                     #   abstract Executor (+ cancel/modify mgmt ops)
+    models.py                   #   OrderRequest, ExecutionResult, ManagementResult, enums
     validation.py               #   validate_order() (shared gate)
     dry_run.py                  #   DryRunExecutor
     kite.py                     #   KiteExecutor (live Zerodha Kite; lazy SDK)
@@ -153,11 +159,14 @@ tests/
   test_parser.py                # 32
   test_repository.py            # 20
   test_trade_engine.py          # 15
-  test_executor.py              # 16 — DryRunExecutor + factory + validation
+  test_executor.py              # 19 — DryRunExecutor + factory + validation + mgmt ops
   test_execution_repository.py  # 8  — executions table CRUD + schema
-  test_pipeline.py              # 6  — end-to-end parse→evaluate→store→execute
-  test_kite_executor.py         # 27 — KiteExecutor (mocked Kite) + resolution + errors
+  test_pipeline.py              # 9  — end-to-end signals + management commands
+  test_kite_executor.py         # 40 — KiteExecutor: orders, SL-M, status, cancel/modify, errors
   test_kite_instruments.py      # 9  — KiteInstrumentResolver (fixture data)
+  test_commands.py              # 44 — ManagementCommand parser + parse_message dispatch
+  test_trade_repository.py      # 14 — trades table CRUD + lifecycle + most_recent_active
+  test_trade_manager.py         # 19 — command handlers + open_position + OCO reconcile
 ```
 
 ## Trade engine notes (completed 2026-06-26)
@@ -417,6 +426,232 @@ sizes from the instrument master (`KiteInstrumentResolver` already surfaces
 `lot_size`) and replace the config-backed lot sizes behind the existing
 `LotSizeProvider` seam — no engine change needed.
 
+## Trade-management commands — Phase 1: parse + state + dry-run (completed 2026-06-30)
+
+Beyond *entry* signals, the channel also posts short **management** messages that
+act on an already-placed trade rather than open a new one. Three are supported,
+from real channel wording:
+
+| Message | Command | Semantics |
+| --- | --- | --- |
+| `Avoid` | `AVOID` | cancel the entry if placed but **not yet filled** |
+| `SAFE TRADERS BOOK PROFIT` | `BOOK_PROFIT` | exit the open position now, at market |
+| `MODIFY SL TO COST` | `MODIFY_STOP_LOSS` (to cost) | move the stop-loss to the entry price |
+
+(`MODIFY_TARGET` is wired with a **tentative** regex — no real "move target"
+message has been provided yet; confirm the wording before relying on it.)
+
+This is **Phase 1** of the feature: parsing, active-trade state, and the full
+command behaviour exercised on the **dry-run** executor. No live broker calls yet
+(that is Phase 2 — see *Next*). Design decisions agreed up front: commands
+correlate to a trade **positionally** (the most recently active trade — no
+Telegram-reply linkage); the app will **manage real resting stop-loss orders** on
+the broker (so "move SL" modifies a live order); all four command types are in
+scope.
+
+- **`commands.py`** — deterministic, regex-only command parser (mirrors
+  `parser.py`). `CommandAction` enum, `PriceRef.COST` (symbolic "move to entry"),
+  the frozen `ManagementCommand`, `parse_command()`, and **`parse_message()`** —
+  the single entry point that returns a `Signal` (entry), a `ManagementCommand`,
+  or `None` (noise). Patterns are **strict** (anchored full-message matches, edge
+  punctuation/emoji and channel-branding prefixes tolerated): a false positive can
+  exit a *real* position, so a miss is preferred to a guess. Entry signals (the
+  fixed 3-line shape) are tried first and never collide with commands.
+- **`trade_repository.py`** + migration **v7** — the `trades` table and
+  `TradeRepository`/`StoredTrade` (mirrors the `database`/`repository` split).
+  Tracks the live position through `PENDING_ENTRY → OPEN → CLOSED / CANCELLED`.
+  Key query **`most_recent_active()`** (latest `PENDING_ENTRY`/`OPEN`; skips
+  closed/cancelled) backs the positional correlation. Broker handles
+  (`tradingsymbol`, `entry_order_id`, `sl_order_id`, `target_order_id`) are
+  nullable — filled in by the live executor in Phase 2; a dry run leaves them
+  `NULL`. `SCHEMA_VERSION` now **7**. Verified: v5→v7 on the live DB preserved all
+  8 signals and created `trades`.
+- **`trade_manager.py`** — `TradeManager` turns a `ManagementCommand` into the
+  right broker action on the most-recent-active trade (the command analogue of
+  `build_order_request`). **Avoid** → cancel a `PENDING_ENTRY` entry (else
+  "already filled — use book profit"); **Book profit** → a market **SELL** through
+  the ordinary `Executor.execute` (so it is validated + recorded like any order),
+  then cancel the resting stop; **Move SL/target** → to *cost* (the trade's entry
+  price) or an explicit number. Returns a `ManagementReport`
+  (`ManagementOutcome`: `NO_TARGET` / `NOT_APPLICABLE` / `CANCELLED` / `EXITED` /
+  `MODIFIED` / `FAILED`). Also owns `open_trade()` — the pipeline calls it after a
+  successful entry execution.
+- **Executor interface** (`execution/base.py`, `models.py`) — added broker
+  operations on an *existing* order: `cancel_order`, `modify_stop_loss`,
+  `modify_target`, returning a new broker-neutral `ManagementResult`
+  (`ManagementAction` enum). The base provides **safe defaults** that report
+  `FAILED` ("not supported in '<mode>' mode"), so `KiteExecutor` stays concrete
+  and degrades cleanly until Phase 2 implements them. `DryRunExecutor` overrides
+  them to log `[DRY RUN] Would CANCEL/MODIFY …` and report `SUCCESS`. (Booking
+  profit is **not** a new op — it is an ordinary exit order via `execute`.)
+- **`pipeline.py`** — `process()` now dispatches via `parse_message`: an entry
+  signal runs the existing path **and opens an active `trades` row on a successful
+  execution**; a command is applied via the `TradeManager`. New `PipelineStatus`
+  members (`NO_TARGET` / `NOT_APPLICABLE` / `CANCELLED` / `EXITED` / `MODIFIED` /
+  `MGMT_FAILED`); `PipelineResult` carries the `command` + `ManagementReport`.
+  `SignalPipeline(repository, engine, executor, trade_manager)`.
+- **`telegram_listener.py`** — prints a `COMMAND … → outcome` line. With positional
+  correlation the listener needs **no** extra message metadata, so its signature is
+  unchanged.
+- **`main.py`** — builds `TradeRepository` + `TradeManager` and injects the manager
+  into the pipeline.
+- **Dry-run simplification (Phase 1 only):** a dry run can't observe fills, so a
+  successfully *submitted* entry opens the trade directly as **`OPEN`** (with the
+  signal's levels; `entry_price` is the "cost" a later *move SL to cost* uses).
+  This lets book-profit and stop moves be exercised end-to-end; `Avoid` (which
+  needs `PENDING_ENTRY`) reports "already filled" in a pure dry-run flow, and its
+  cancel path is covered by manager unit tests with a pending trade. Phase 2 (live)
+  refines this to `PENDING_ENTRY → OPEN`-on-fill.
+- Tests: `test_commands.py` (44), `test_trade_repository.py` (14),
+  `test_trade_manager.py` (11), plus management cases added to `test_pipeline.py`
+  and `test_executor.py`. Verified end-to-end on a dry-run pipeline: entry →
+  `MODIFY SL TO COST` (SL → 165) → `BOOK PROFIT` (exited) → `Avoid` (no target).
+  Total suite **208 passing** (`uv run pytest`).
+
+## Trade-management commands — Phase 2: live Kite (completed 2026-06-30)
+
+Makes the management commands act on the **real broker**, and — crucially — makes
+the system place the **protective orders** it never placed before. Today an entry
+goes to Kite with no stop; this phase adds a resting **stop-loss (SL-M)** and a
+resting **target (LIMIT)** after the entry fills, both **MIS**, plus app-managed
+**one-cancels-other (OCO)**.
+
+**Why this shape** (decisions made with the user): the channel does **not** always
+send exit messages, so *both* protective legs must be automated — relying on a
+"BOOK PROFIT" message isn't safe. Zerodha discontinued **Bracket Orders** (2021),
+so there's no single entry-with-stop order — the stop must be a **separate order**,
+and it can only be placed sensibly *after* the entry fills. **GTT-OCO was rejected**
+because GTT places **NRML/CNC**, not MIS, so it wouldn't cleanly flatten an intraday
+MIS long. So: two separate MIS exit orders (SL-M + LIMIT), with the app handling the
+OCO via Kite's reliable `cancel_order`. Residual risk: a small double-fill race if
+price gaps through both levels before the sibling is cancelled (documented; bounded
+by reconcile latency).
+
+- **Architecture choice — `execute()` stays a single-order primitive.** Rather than
+  bundling fill-polling + child orders into `KiteExecutor.execute()` (which would
+  break its "place one order" contract and tests), the broker-specific calls stay
+  one-order each, and the **protected-entry orchestration lives in the broker-
+  agnostic `TradeManager`**. This keeps broker code inside the executor and
+  sequencing outside it, and the dry run gets protective placement for free.
+- **New execution primitives** (`execution/models.py`, `base.py`, `kite.py`):
+  - `OrderType.SL_M` + `OrderRequest.trigger_price` — the resting stop; `validate_order`
+    requires a positive trigger. `_to_kite_params` emits `trigger_price` for SL-M
+    (and the existing `price` for LIMIT) — the only Kite-specific mapping, unchanged
+    for the entry.
+  - `OrderState` / `OrderStatus` (PENDING / COMPLETE / CANCELLED / REJECTED /
+    UNKNOWN) + `Executor.get_order_state(broker_order_id)` — used for fill detection
+    and OCO. Base default is `UNKNOWN` (safe — never treats anything as filled);
+    `DryRunExecutor` reports `COMPLETE` (so orchestration runs end-to-end with no
+    broker ids); `KiteExecutor` reads `order_history` and maps Kite's status string.
+  - `KiteExecutor.cancel_order` / `modify_stop_loss` / `modify_target` against the
+    SDK (`cancel_order` / `modify_order` with `variety="regular"`), every failure
+    translated to a structured `ManagementResult` (never raises). The `KiteClient`
+    Protocol gained `modify_order` / `cancel_order` / `order_history`.
+- **`TradeManager.open_position(signal, entry_order, …)`** — the orchestration:
+  place entry → **bounded poll** `get_order_state` until COMPLETE (configurable
+  `fill_timeout` / `poll_interval`, injected `sleep`) → on a fill, place SL-M
+  (trigger = signal stop) + target LIMIT (price = signal target), sized to the
+  **actual filled qty**, recording all three order ids and the **fill price** on the
+  trade (`OPEN`). An accepted-but-unfilled entry opens `PENDING_ENTRY` (still
+  *Avoid*-able) with no protection; a rejected entry opens nothing. A failed
+  protective-leg placement is logged loudly but doesn't abort (the entry is live).
+- **`TradeManager.reconcile()`** — the OCO: for each `OPEN` trade with broker ids,
+  if a leg filled, **cancel its sibling and close the trade**. Called by the
+  pipeline before handling each message, so commands act on fresh state. Trades with
+  no order ids (dry run) are skipped. (`Avoid` now works live: a `PENDING_ENTRY`
+  entry is cancelled via `cancel_order`.)
+- **Pipeline** — `_process_signal` now calls `trade_manager.open_position` (instead
+  of `executor.execute` + `open_trade`); `process()` calls `reconcile()` first. The
+  pipeline no longer holds the executor directly (the manager owns it):
+  `SignalPipeline(repository, engine, trade_manager)`.
+- **Dry run is unchanged in spirit but richer:** a successful entry now also logs +
+  records the two protective orders (so the `executions` table shows entry + SL-M +
+  LIMIT), and the trade opens `OPEN` with `NULL` order ids.
+- Verified end-to-end (integration smoke, fake Kite client): entry placed → filled
+  @164.5 → SL-M + target LIMIT placed → trade `OPEN`; then a stop fill drove
+  `reconcile` to **cancel the target and close the trade**.
+- Tests: +21 — `test_kite_executor.py` (SL-M params, `get_order_state` mapping +
+  safety, cancel/modify); `test_trade_manager.py` (`open_position` filled/unfilled/
+  rejected, live Avoid, OCO reconcile both directions + skip cases). Suite
+  **229 passing** (`uv run pytest`).
+
+**Known limitations / follow-ups:**
+- **Reconcile cadence:** OCO fires on the *next inbound message*, so a self-triggered
+  stop/target is cancelled with up-to-next-message latency (and `reconcile` calls
+  `order_history` per open trade per message — watch Kite rate limits on a chatty
+  channel). A websocket **postback**/ticker or a throttled periodic poll would make
+  it prompt and cheaper.
+- **Pending→open upgrade:** an entry that fills *after* the poll window stays
+  `PENDING_ENTRY` and never gets protection retroactively — `reconcile` could be
+  extended to detect the late fill and place the stops.
+- **Fill-poll timing** is constructor config (defaults 5 s / 0.5 s), not `.env` —
+  promote to `Config` if it needs operational tuning.
+- **EOD square-off:** MIS auto-square-off (~15:20) isn't reconciled — stale resting
+  orders/trades at day end should be cleaned up.
+- **`MODIFY_TARGET`** parser wording is still tentative (no real message).
+
+## Second channel — parse-only + per-channel switches (completed 2026-07-05)
+
+Added a **second signal channel** (`-1001524695283`) alongside the primary one.
+It posts the same *intent* (option entries) in a **very different, looser format**,
+and — per decision — is **parse-only for now** (parsed + stored + logged, **not
+traded**; live trading, likely via **FYERS**, comes later).
+
+- **Channel-2 format** (drove a separate parser): variable field order (`Lot` /
+  `Target` / `Sl` / `Cmp` matched **by label**, not line position); **any
+  underlying**, mostly **stock** options (multi-word names like `Apollo hospital`),
+  not just NIFTY/BANKNIFTY; **multiple comma-separated targets**; decimals; free
+  chatter lines (`One more`, `Cmp …`). `Type mistake` = cancel the previous signal
+  (ch2's *Avoid*); `🔥 … Safe target Done ✔️` / `sl hit on this` = narration (noise).
+- **Decisions (2026-07-05):** parse-only for now; use the **first** target, taken
+  **raw** (no offset — ch1's −2pt offset is wrong for cheap stock-option premiums);
+  **single lot** everywhere (in-message `Lot` is ignored for sizing); per-channel
+  **enable switch** via env at startup; **per-channel isolation** (storage tagged by
+  source; trade-level isolation lands when ch2 trades).
+- **`channel2.py`** — `parse_channel2_signal()`: deterministic regex, reuses the
+  existing `Signal` shape. Header `^<underlying> <strike> <ce|pe> (above|at) <entry>$`
+  (multi-word underlying, `at`-range takes the first number); `Sl`/`Target` scanned
+  from any line (stray leading `.` tolerated). Needs header + numeric `Sl` + ≥1
+  `Target` or it rejects (a miss beats a bad parse). First target used, raw;
+  trailing `+`/`++` → `target_open_ended`.
+- **`Channel2Pipeline`** (`pipeline.py`) — parse → store → log; **no engine /
+  executor / trade manager**. Reuses `PipelineResult` with a new
+  `PipelineStatus.STORED`. Same-day repeats → `DUPLICATE`; noise → `IGNORED`.
+- **Source-scoped storage** — migration **v8** adds a `source` column to `signals`
+  (plain `ALTER`; a table rebuild would break the `executions`/`trades` FKs; existing
+  rows backfill to `channel1`). `SignalRepository(connection, *, tz, source=…)` now
+  stores/queries only its source, so ch1's engine counts/dedupe never see ch2 rows.
+  `SCHEMA_VERSION` now **8**. Verified on the live DB: v7→v8 preserved all 8 signals,
+  backfilled `channel1`, FK check clean. *(Caveat: the day-scoped
+  `UNIQUE(message_hash, trade_date)` is channel-agnostic — two channels posting an
+  identically-hashing signal the same day would collide; vanishingly rare given the
+  different instruments/formats, and harmless for a parse-only channel.)*
+- **Multi-channel listener** — `TelegramListener(config, subscriptions)` takes a list
+  of `ChannelSubscription(name, channel, processor)` and registers **one Telethon
+  handler per channel** (Telethon does the routing; no manual `chat_id` dispatch).
+  Both pipelines satisfy a shared `MessageProcessor` protocol, so the listener treats
+  them uniformly. One process, one session — no second login.
+- **Config** — `TELEGRAM_CHANNEL_2` (optional; unset ⇒ single channel),
+  `CHANNEL_1_ENABLED` / `CHANNEL_2_ENABLED` (default **true**; a channel with no id
+  is skipped). New trailing `Config` fields have defaults so existing constructors
+  (and the test `_config()` helpers) are untouched. `.env.example` updated.
+- **`main.py`** — builds a channel-2 `SignalRepository(source="channel2")` +
+  `Channel2Pipeline`, assembles the enabled subscriptions, and errors out cleanly if
+  none are enabled.
+- **`fetch_history.py`** (dev helper) — gained `--raw` (dump full untruncated text,
+  no parsing) and `--channel` numeric-id coercion, used to reverse-engineer ch2's
+  format from real history.
+- Tests: `test_channel2.py` (parser: standard/reordered/multi-word/decimals/
+  first-target-raw/open-ended/`at`-range/`.lot`/lead-in + noise & missing-field
+  rejection) and `test_channel2_pipeline.py` (ignored/stored/duplicate + source
+  isolation). Suite **253 passing** (`uv run pytest`).
+
+**Follow-ups when ch2 goes live (FYERS):** a channel-2 command parser (`Type mistake`
+→ cancel) and **trade-level** per-channel isolation (tag `trades` with source so
+management commands act only on same-channel positions); a FYERS `Executor`
+implementation; stock-option symbol/lot resolution (verify the resolver handles
+monthly expiries); decide scale-out vs first-target-only for real orders.
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -457,7 +692,7 @@ sizes from the instrument master (`KiteInstrumentResolver` already surfaces
 
 1. Point me at this file: "read docs/PROGRESS.md" (it is NOT auto-loaded).
 2. `uv sync` if the venv is missing, then `uv run python main.py` to run.
-3. `uv run pytest` to confirm the 131 tests pass.
+3. `uv run pytest` to confirm the 229 tests pass.
 4. Outstanding housekeeping: optionally set a real `TELEGRAM_CHANNEL` (currently
    `me`); no git remote configured yet.
 
@@ -477,6 +712,11 @@ Live orders now resolve to the exact Kite tradingsymbol (nearest weekly) via
 `KiteInstrumentResolver` — no manual symbol mapping needed.
 
 **Known follow-up (not started):**
+- **Trade-management Phase 2 (live Kite): ✅ done** — see the "Phase 2: live Kite"
+  notes above (SL-M + target LIMIT protection, bounded fill poll, app-managed OCO,
+  live cancel/modify). Remaining polish is listed there (reconcile cadence/postbacks,
+  pending→open upgrade, EOD square-off, fill-poll config, real `MODIFY_TARGET`
+  wording).
 - **`BrokerLotSizeProvider`** — source lot sizes from the broker instrument master
   instead of `.env`, behind the existing `LotSizeProvider` seam.
   `KiteInstrumentResolver` already surfaces `lot_size`, so this is mostly wiring

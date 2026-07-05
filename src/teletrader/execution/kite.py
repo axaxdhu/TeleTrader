@@ -53,7 +53,11 @@ from .kite_instruments import (
 from .models import (
     ExecutionResult,
     ExecutionStatus,
+    ManagementAction,
+    ManagementResult,
     OrderRequest,
+    OrderState,
+    OrderStatus,
     OrderType,
     ProductType,
 )
@@ -80,17 +84,35 @@ _PRODUCT_CODES: dict[ProductType, str] = {
 #: Kite "regular" order variety — the only one this app places.
 _VARIETY_REGULAR = "regular"
 
+#: Kite order-status strings → broker-neutral OrderStatus. Anything else
+#: (OPEN, *PENDING*, TRIGGER PENDING, …) is still working → PENDING.
+_STATUS_MAP: dict[str, OrderStatus] = {
+    "COMPLETE": OrderStatus.COMPLETE,
+    "REJECTED": OrderStatus.REJECTED,
+    "CANCELLED": OrderStatus.CANCELLED,
+}
+
 
 class KiteClient(Protocol):
     """The slice of the Kite Connect client this executor depends on.
 
     Declaring it as a Protocol keeps the executor decoupled from the concrete
-    ``kiteconnect.KiteConnect`` class and lets tests inject a fake. Covers both
-    order placement and the instrument master used for symbol resolution.
+    ``kiteconnect.KiteConnect`` class and lets tests inject a fake. Covers order
+    placement/modification/cancellation, order status (for fill detection + OCO),
+    and the instrument master used for symbol resolution.
     """
 
     def place_order(self, **params: Any) -> str:  # pragma: no cover - interface
         """Place an order and return the broker order id."""
+
+    def modify_order(self, **params: Any) -> str:  # pragma: no cover - interface
+        """Modify a working order (price/trigger/quantity)."""
+
+    def cancel_order(self, **params: Any) -> str:  # pragma: no cover - interface
+        """Cancel a working order."""
+
+    def order_history(self, order_id: str) -> list[dict[str, Any]]:  # pragma: no cover
+        """Return the status history of one order (latest state last)."""
 
     def instruments(self, exchange: str) -> list[dict[str, Any]]:  # pragma: no cover
         """Return the broker's instrument master for ``exchange``."""
@@ -178,6 +200,105 @@ class KiteExecutor(Executor):
             tradingsymbol=instrument.tradingsymbol,
         )
 
+    # --- Management operations (act on an order that already exists) -----------
+
+    def get_order_state(self, broker_order_id: str | None) -> OrderState:
+        """Look up a placed order's broker state (for fill detection + OCO).
+
+        Never raises: a failed/empty lookup is reported as ``UNKNOWN`` so callers
+        (the fill poll, OCO reconciliation) degrade safely rather than crash.
+        """
+        if not broker_order_id:
+            return OrderState(OrderStatus.UNKNOWN, raw="no order id")
+        try:
+            history = self._kite.order_history(broker_order_id)
+        except Exception as exc:  # noqa: BLE001 — status checks must not crash callers
+            logger.warning("[KITE] order_history(%s) failed: %r", broker_order_id, exc)
+            return OrderState(OrderStatus.UNKNOWN, raw=repr(exc))
+        if not history:
+            return OrderState(OrderStatus.UNKNOWN, raw="empty history")
+        last = history[-1]
+        raw = str(last.get("status", "") or "")
+        avg = last.get("average_price")
+        qty = last.get("filled_quantity")
+        return OrderState(
+            _STATUS_MAP.get(raw.upper(), OrderStatus.PENDING),
+            average_price=float(avg) if avg else None,
+            filled_quantity=int(qty) if qty is not None else None,
+            raw=raw,
+        )
+
+    def cancel_order(
+        self, broker_order_id: str | None, *, symbol: str | None = None
+    ) -> ManagementResult:
+        if not broker_order_id:
+            return self._mgmt_failed(ManagementAction.CANCEL, "No broker order id to cancel.")
+        return self._mgmt_call(
+            ManagementAction.CANCEL, broker_order_id, symbol,
+            lambda: self._kite.cancel_order(
+                variety=_VARIETY_REGULAR, order_id=broker_order_id
+            ),
+            f"Order {broker_order_id} cancelled.",
+        )
+
+    def modify_stop_loss(
+        self, broker_order_id: str | None, new_trigger: float, *, symbol: str | None = None
+    ) -> ManagementResult:
+        if not broker_order_id:
+            return self._mgmt_failed(
+                ManagementAction.MODIFY_STOP_LOSS, "No stop-loss order to modify."
+            )
+        return self._mgmt_call(
+            ManagementAction.MODIFY_STOP_LOSS, broker_order_id, symbol,
+            lambda: self._kite.modify_order(
+                variety=_VARIETY_REGULAR, order_id=broker_order_id, trigger_price=new_trigger
+            ),
+            f"Stop-loss trigger moved to {new_trigger}.",
+        )
+
+    def modify_target(
+        self, broker_order_id: str | None, new_price: float, *, symbol: str | None = None
+    ) -> ManagementResult:
+        if not broker_order_id:
+            return self._mgmt_failed(
+                ManagementAction.MODIFY_TARGET, "No target order to modify."
+            )
+        return self._mgmt_call(
+            ManagementAction.MODIFY_TARGET, broker_order_id, symbol,
+            lambda: self._kite.modify_order(
+                variety=_VARIETY_REGULAR, order_id=broker_order_id, price=new_price
+            ),
+            f"Target price moved to {new_price}.",
+        )
+
+    def _mgmt_call(
+        self,
+        action: ManagementAction,
+        broker_order_id: str,
+        symbol: str | None,
+        call: Callable[[], Any],
+        success_remark: str,
+    ) -> ManagementResult:
+        """Run a Kite cancel/modify call, translating any failure to a result."""
+        suffix = f" ({symbol})" if symbol else ""
+        try:
+            call()
+        except Exception as exc:  # noqa: BLE001 — every failure becomes a result
+            error = translate_broker_exception(exc)
+            logger.info(
+                "[KITE] %s order=%s%s -> FAILED: %s", action.value, broker_order_id, suffix, error
+            )
+            return ManagementResult(
+                action, _status_for(error), str(error), broker_order_id, self._clock()
+            )
+        logger.info("[KITE] %s order=%s%s -> SUCCESS", action.value, broker_order_id, suffix)
+        return ManagementResult(
+            action, ExecutionStatus.SUCCESS, success_remark, broker_order_id, self._clock()
+        )
+
+    def _mgmt_failed(self, action: ManagementAction, remarks: str) -> ManagementResult:
+        return ManagementResult(action, ExecutionStatus.FAILED, remarks, None, self._clock())
+
     def _resolve(self, order: OrderRequest, *, on_date: Any) -> ResolvedInstrument:
         """Resolve the order's option to a concrete Kite contract.
 
@@ -216,6 +337,8 @@ class KiteExecutor(Executor):
         }
         if order.order_type is OrderType.LIMIT:
             params["price"] = order.entry_price
+        elif order.order_type is OrderType.SL_M:
+            params["trigger_price"] = order.trigger_price
         return params
 
     def _reject(

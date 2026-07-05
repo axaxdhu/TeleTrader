@@ -29,7 +29,11 @@ def validate_order(order: OrderRequest) -> None:
         order.entry_price is None or order.entry_price <= 0
     ):
         raise InvalidOrderError("LIMIT order requires a positive entry_price")
-    for name in ("entry_price", "stop_loss", "target"):
+    if order.order_type is OrderType.SL_M and (
+        order.trigger_price is None or order.trigger_price <= 0
+    ):
+        raise InvalidOrderError("SL-M order requires a positive trigger_price")
+    for name in ("entry_price", "stop_loss", "target", "trigger_price"):
         value = getattr(order, name)
         if value is not None and value <= 0:
             raise InvalidOrderError(f"{name} must be positive when set, got {value}")
