@@ -16,6 +16,7 @@ from teletrader.config import Config, ConfigError
 from teletrader.database import connect, initialize
 from teletrader.execution import ExecutionRepository, create_executor
 from teletrader.logging_config import configure_logging, get_logger
+from teletrader.notifier import create_notifier
 from teletrader.pipeline import Channel2Pipeline, SignalPipeline
 from teletrader.repository import SignalRepository
 from teletrader.telegram_listener import ChannelSubscription, TelegramListener
@@ -81,7 +82,11 @@ def main() -> int:
         )
         return 1
 
-    listener = TelegramListener(config, subscriptions)
+    # Optional push alerts (recognised signal + outcome) via a Telegram bot.
+    notifier = create_notifier(config)
+    logger.info("Notifications: %s", "on" if config.notify_enabled else "off")
+
+    listener = TelegramListener(config, subscriptions, notifier=notifier)
     try:
         asyncio.run(listener.run())
     except KeyboardInterrupt:

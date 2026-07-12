@@ -16,6 +16,7 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | —     | Trade-management commands (Phase 2: live Kite — protection, fill, OCO) | ✅ Done (229 total) |
 | —     | Second channel (parse-only) + per-channel switches | ✅ Done (253 total) |
 | —     | FYERS broker + per-channel broker selection | ✅ Done (308 total) |
+| —     | Telegram bot notifications (signal + outcome) | ✅ Done (322 total) |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
 > The trade engine is the broker-agnostic decision layer (it *decides*, it does
@@ -728,6 +729,38 @@ per-channel. See the `per-channel-broker` memory.
 `CHANNEL_1_BROKER=fyers`), supply `FYERS_APP_ID`/`FYERS_SECRET_ID`/
 `FYERS_ACCESS_TOKEN` (regenerate the token daily with `fyers_login.py`),
 `AUTO_TRADING=true`, run from the whitelisted static IP, inside market hours.
+
+## Telegram bot notifications (completed 2026-07-12)
+
+Push alerts for **every recognised signal + its outcome** (the `Notifications`
+box in the architecture), delivered via a Telegram **bot** — chosen over messaging
+the user's own account because Telegram push-notifies for a bot's messages but not
+for one's own. Fires on placed/dry-run orders, not-traded (with reason),
+duplicates, parse-only stores, management-command results, and failures; pure
+noise (`IGNORED`) is skipped. **Requested: alerts even when no order is placed and
+in dry-run** — both covered.
+
+- **`notifier.py`** — `Notifier` protocol, `NullNotifier` (no-op), and
+  `TelegramBotNotifier` (one stdlib-`urllib` HTTPS POST to the Bot API; the sender
+  is injectable for tests). **Best-effort:** any send failure is logged and
+  swallowed, never raised, so a notification problem can't disturb trading.
+  `create_notifier(config)` returns the bot notifier only when enabled + fully
+  configured, else the no-op. `format_alert(result, *, channel_name, broker)`
+  turns a `PipelineResult` into the alert text (or `None` to skip) — the listener
+  stays thin.
+- **`telegram_listener.py`** — takes an optional `notifier` (defaults to
+  `NullNotifier`); after `_report` it formats + sends an alert for the message's
+  outcome, tagged with the channel and its broker. No new Telethon coupling.
+- **`main.py`** — builds the notifier via `create_notifier` and injects it; logs
+  whether notifications are on.
+- **Config** — `NOTIFY_ENABLED` (default false), `NOTIFY_BOT_TOKEN`,
+  `NOTIFY_CHAT_ID` (trailing fields with defaults; the token is a secret, never
+  logged). `.env.example` + README updated.
+- **Independence:** the bot is a *separate identity* with no access to the user's
+  account, signal channels, or broker/credentials — purely an outbound notifier.
+- Tests: `test_notifier.py` (14 — formatting for each outcome incl. dry-run &
+  not-traded, best-effort swallow of send failures, enabled/disabled/unconfigured
+  factory). Suite **322 passing** (`uv run pytest`).
 
 ## Git state
 

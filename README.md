@@ -77,6 +77,8 @@ Copy `.env.example` to `.env` and fill in the values:
 | `CHANNEL_2_BROKER`       | no       | Per-channel broker override for channel 2 (falls back to `EXECUTION_MODE`) |
 | `KITE_API_KEY` / `KITE_API_SECRET` / `KITE_ACCESS_TOKEN` | if `kite` | Zerodha Kite creds; token is manual/daily (`kite_login.py`) |
 | `FYERS_APP_ID` / `FYERS_SECRET_ID` / `FYERS_ACCESS_TOKEN` | if `fyers` | FYERS creds; token is manual/daily (`fyers_login.py`). Live orders need a whitelisted static IP |
+| `NOTIFY_ENABLED`         | no       | Send push alerts (recognised signal + outcome) via a Telegram bot (default `false`) |
+| `NOTIFY_BOT_TOKEN` / `NOTIFY_CHAT_ID` | if notify | Bot token from @BotFather + your chat id (secret; needed when `NOTIFY_ENABLED=true`) |
 
 ## Installation
 

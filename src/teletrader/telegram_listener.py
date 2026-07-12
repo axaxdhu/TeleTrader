@@ -18,6 +18,7 @@ from telethon import TelegramClient, events
 
 from .config import Config
 from .logging_config import get_logger
+from .notifier import Notifier, NullNotifier, format_alert
 from .pipeline import MessageProcessor, PipelineResult, PipelineStatus
 
 logger = get_logger(__name__)
@@ -43,12 +44,17 @@ class TelegramListener:
     """Listens for new messages on one or more configured Telegram channels."""
 
     def __init__(
-        self, config: Config, subscriptions: list[ChannelSubscription]
+        self,
+        config: Config,
+        subscriptions: list[ChannelSubscription],
+        *,
+        notifier: Notifier | None = None,
     ) -> None:
         if not subscriptions:
             raise ValueError("TelegramListener needs at least one channel subscription")
         self._config = config
         self._subscriptions = subscriptions
+        self._notifier = notifier or NullNotifier()
         self._client = TelegramClient(
             config.session_name,
             config.api_id,
@@ -133,6 +139,17 @@ class TelegramListener:
             return
 
         self._report(result, text, message.date, sub.name)
+        self._notify(result, sub.name)
+
+    def _notify(self, result: PipelineResult, channel_name: str) -> None:
+        """Send a push alert for a recognised signal/command (best-effort)."""
+        alert = format_alert(
+            result,
+            channel_name=channel_name,
+            broker=self._config.broker_for(channel_name),
+        )
+        if alert is not None:
+            self._notifier.notify(alert)
 
     @staticmethod
     def _report(

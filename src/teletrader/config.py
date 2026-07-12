@@ -75,6 +75,14 @@ class Config:
     # single-broker setups keep working. Resolve via :meth:`broker_for`.
     channel_1_broker: str | None = None
     channel_2_broker: str | None = None
+    # --- Telegram bot notifications ------------------------------------------
+    # Optional push alerts (recognised signal + outcome) sent to you via a
+    # Telegram *bot* — a separate sender, so your phone actually notifies (unlike
+    # messaging your own account). Off by default; the token is a secret (never
+    # logged / committed). See teletrader.notifier.
+    notify_enabled: bool = False
+    notify_bot_token: str | None = None
+    notify_chat_id: str | None = None
 
     def broker_for(self, channel_name: str) -> str:
         """Return the broker mode a channel should use (its own or the default).
@@ -142,6 +150,9 @@ class Config:
             **fyers_creds,
             channel_1_broker=channel_1_broker,
             channel_2_broker=channel_2_broker,
+            notify_enabled=_parse_bool("NOTIFY_ENABLED", default=False),
+            notify_bot_token=os.getenv("NOTIFY_BOT_TOKEN") or None,
+            notify_chat_id=os.getenv("NOTIFY_CHAT_ID") or None,
         )
 
 
