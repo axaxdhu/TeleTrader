@@ -61,6 +61,34 @@ class Config:
     channel_2: int | str | None = None
     channel_1_enabled: bool = True
     channel_2_enabled: bool = True
+    # --- Live broker: FYERS --------------------------------------------------
+    # Only required when a channel is routed to the ``fyers`` broker. Like Kite,
+    # authentication is manual: a valid daily access token is assumed to already
+    # exist (this app never logs in nor generates tokens; see ``fyers_login.py``).
+    # Secrets, never logged.
+    fyers_app_id: str | None = None
+    fyers_secret_id: str | None = None
+    fyers_access_token: str | None = None
+    # --- Per-channel broker selection ----------------------------------------
+    # Each channel can route to its own broker independently. An unset override
+    # falls back to ``execution_mode`` (the global default), so existing
+    # single-broker setups keep working. Resolve via :meth:`broker_for`.
+    channel_1_broker: str | None = None
+    channel_2_broker: str | None = None
+
+    def broker_for(self, channel_name: str) -> str:
+        """Return the broker mode a channel should use (its own or the default).
+
+        A per-channel override (``CHANNEL_1_BROKER`` / ``CHANNEL_2_BROKER``) wins;
+        otherwise the channel uses ``execution_mode``. This is the one place the
+        per-channel routing is resolved, so the composition root can ask each
+        channel for *its* broker and build the matching executor.
+        """
+        overrides = {
+            "channel1": self.channel_1_broker,
+            "channel2": self.channel_2_broker,
+        }
+        return overrides.get(channel_name) or self.execution_mode
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -80,6 +108,15 @@ class Config:
             ) from exc
 
         execution_mode = _parse_execution_mode("EXECUTION_MODE", default="dry_run")
+        channel_1_broker = _parse_optional_execution_mode("CHANNEL_1_BROKER")
+        channel_2_broker = _parse_optional_execution_mode("CHANNEL_2_BROKER")
+
+        # Credentials are required for any broker actually referenced (the global
+        # default or a per-channel override), so a misconfigured live broker fails
+        # fast at startup rather than at the first order.
+        referenced = {execution_mode, channel_1_broker, channel_2_broker} - {None}
+        kite_creds = _parse_kite_credentials(referenced)
+        fyers_creds = _parse_fyers_credentials(referenced)
 
         return cls(
             api_id=api_id,
@@ -98,10 +135,13 @@ class Config:
             market_close=_parse_time("MARKET_CLOSE_TIME", default="15:30"),
             market_timezone=_parse_timezone("MARKET_TIMEZONE", default="Asia/Kolkata"),
             execution_mode=execution_mode,
-            **_parse_kite_credentials(execution_mode),
+            **kite_creds,
             channel_2=_parse_optional_channel("TELEGRAM_CHANNEL_2"),
             channel_1_enabled=_parse_bool("CHANNEL_1_ENABLED", default=True),
             channel_2_enabled=_parse_bool("CHANNEL_2_ENABLED", default=True),
+            **fyers_creds,
+            channel_1_broker=channel_1_broker,
+            channel_2_broker=channel_2_broker,
         )
 
 
@@ -163,13 +203,15 @@ def _parse_int(name: str, *, default: int) -> int:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
 
 
-#: Order-execution modes. ``dry_run`` validates + logs without sending; ``kite``
-#: (live) arrives in a later phase. Switching modes selects the executor.
-_EXECUTION_MODES = frozenset({"dry_run", "kite"})
+#: Order-execution modes / broker selectors. ``dry_run`` validates + logs without
+#: sending; ``kite`` and ``fyers`` place live orders. A channel selects one of
+#: these (globally via ``EXECUTION_MODE`` or per-channel via ``CHANNEL_N_BROKER``);
+#: the factory maps the chosen mode to an executor.
+_EXECUTION_MODES = frozenset({"dry_run", "kite", "fyers"})
 
 
 def _parse_execution_mode(name: str, *, default: str) -> str:
-    """Parse and validate ``EXECUTION_MODE`` against the known modes."""
+    """Parse and validate an execution-mode env var against the known modes."""
     value = os.getenv(name, default).strip().lower()
     if value not in _EXECUTION_MODES:
         allowed = ", ".join(sorted(_EXECUTION_MODES))
@@ -177,36 +219,86 @@ def _parse_execution_mode(name: str, *, default: str) -> str:
     return value
 
 
-def _parse_kite_credentials(execution_mode: str) -> dict[str, str | None]:
-    """Read the Kite credentials, requiring them only when running live.
+def _parse_optional_execution_mode(name: str) -> str | None:
+    """Parse an *optional* per-channel broker override (``None`` when unset).
 
-    For ``EXECUTION_MODE=kite`` all three (``KITE_API_KEY``, ``KITE_API_SECRET``,
-    ``KITE_ACCESS_TOKEN``) must be set — missing ones fail fast at startup. For
-    ``dry_run`` they are optional (and usually absent). Authentication is manual:
-    the access token is assumed already valid; this app never logs in.
+    Same validation as :func:`_parse_execution_mode`, but an absent variable means
+    "use the global default" (resolved in :meth:`Config.broker_for`).
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip().lower()
+    if value not in _EXECUTION_MODES:
+        allowed = ", ".join(sorted(_EXECUTION_MODES))
+        raise ConfigError(f"{name} must be one of {{{allowed}}}, got {value!r}")
+    return value
+
+
+def _parse_kite_credentials(referenced_modes: set[str]) -> dict[str, str | None]:
+    """Read the Kite credentials, requiring them only when ``kite`` is in use.
+
+    If any channel routes to ``kite`` all three (``KITE_API_KEY``,
+    ``KITE_API_SECRET``, ``KITE_ACCESS_TOKEN``) must be set — missing ones fail
+    fast at startup. Otherwise they are optional (and usually absent).
+    Authentication is manual: the access token is assumed already valid; this app
+    never logs in.
     """
     creds = {
         "kite_api_key": os.getenv("KITE_API_KEY") or None,
         "kite_api_secret": os.getenv("KITE_API_SECRET") or None,
         "kite_access_token": os.getenv("KITE_ACCESS_TOKEN") or None,
     }
-    if execution_mode == "kite":
-        missing = [
-            env
-            for env, field in (
+    if "kite" in referenced_modes:
+        _require_credentials(
+            "kite",
+            creds,
+            (
                 ("KITE_API_KEY", "kite_api_key"),
                 ("KITE_API_SECRET", "kite_api_secret"),
                 ("KITE_ACCESS_TOKEN", "kite_access_token"),
-            )
-            if creds[field] is None
-        ]
-        if missing:
-            raise ConfigError(
-                "EXECUTION_MODE=kite requires "
-                + ", ".join(missing)
-                + " to be set"
-            )
+            ),
+        )
     return creds
+
+
+def _parse_fyers_credentials(referenced_modes: set[str]) -> dict[str, str | None]:
+    """Read the FYERS credentials, requiring them only when ``fyers`` is in use.
+
+    If any channel routes to ``fyers`` all three (``FYERS_APP_ID``,
+    ``FYERS_SECRET_ID``, ``FYERS_ACCESS_TOKEN``) must be set — missing ones fail
+    fast at startup. Otherwise they are optional. Authentication is manual (a
+    valid daily token is assumed; see ``fyers_login.py``).
+    """
+    creds = {
+        "fyers_app_id": os.getenv("FYERS_APP_ID") or None,
+        "fyers_secret_id": os.getenv("FYERS_SECRET_ID") or None,
+        "fyers_access_token": os.getenv("FYERS_ACCESS_TOKEN") or None,
+    }
+    if "fyers" in referenced_modes:
+        _require_credentials(
+            "fyers",
+            creds,
+            (
+                ("FYERS_APP_ID", "fyers_app_id"),
+                ("FYERS_SECRET_ID", "fyers_secret_id"),
+                ("FYERS_ACCESS_TOKEN", "fyers_access_token"),
+            ),
+        )
+    return creds
+
+
+def _require_credentials(
+    broker: str,
+    creds: dict[str, str | None],
+    mapping: tuple[tuple[str, str], ...],
+) -> None:
+    """Raise :class:`ConfigError` if any credential for ``broker`` is missing."""
+    missing = [env for env, field in mapping if creds[field] is None]
+    if missing:
+        raise ConfigError(
+            f"broker '{broker}' requires " + ", ".join(missing) + " to be set"
+        )
 
 
 def _parse_lot_sizes(name: str) -> Mapping[str, int]:

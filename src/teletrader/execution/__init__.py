@@ -9,7 +9,9 @@ implementations are interchangeable behind the interface, chosen by
   submitted, and records the attempt to SQLite. Sends nothing to any broker;
   models no fills, positions, or P&L. Used to validate the pipeline end-to-end.
 - :class:`KiteExecutor` (``kite``) — submits live orders to Zerodha Kite behind
-  this same interface. The only module that touches a broker SDK.
+  this same interface.
+- :class:`FyersExecutor` (``fyers``) — submits live orders to FYERS behind the
+  same interface. Each channel can pick its own broker (``Config.broker_for``).
 
 This layer is independent of Telegram and of any broker SDK. Public surface
 (import from ``teletrader.execution``):
@@ -36,7 +38,13 @@ from .exceptions import (
     OrderRejectedError,
     RateLimitError,
 )
-from .factory import KITE_MODE, create_executor
+from .factory import FYERS_MODE, KITE_MODE, create_executor
+from .fyers import FyersExecutor
+from .fyers_instruments import (
+    FyersCsvSymbolMaster,
+    FyersInstrumentResolver,
+    FyersSymbolSource,
+)
 from .kite import KiteExecutor
 from .kite_instruments import (
     InstrumentResolver,
@@ -67,6 +75,11 @@ __all__ = [
     "ExecutionStatus",
     "Executor",
     "DryRunExecutor",
+    "FYERS_MODE",
+    "FyersCsvSymbolMaster",
+    "FyersExecutor",
+    "FyersInstrumentResolver",
+    "FyersSymbolSource",
     "InstrumentNotFoundError",
     "InstrumentResolver",
     "InsufficientMarginError",

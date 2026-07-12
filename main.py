@@ -45,15 +45,17 @@ def main() -> int:
     execution_repository = ExecutionRepository(connection)
     trade_repository = TradeRepository(connection, tz=market_tz)
 
-    # Decision + execution: the engine decides; the configured executor submits
-    # (a dry run unless EXECUTION_MODE=kite). The trade manager applies management
+    # Decision + execution: the engine decides; the configured executor submits.
+    # The broker is selected per channel (Config.broker_for), so channel 1 uses
+    # its own broker (dry_run / kite / fyers). The trade manager applies management
     # commands (avoid / book profit / move SL) to active trades. The pipeline
     # glues the stages.
+    channel_1_broker = config.broker_for("channel1")
     engine = TradeEngine(config, signal_repository)
-    executor = create_executor(config, execution_repository)
+    executor = create_executor(config, execution_repository, mode=channel_1_broker)
     trade_manager = TradeManager(trade_repository, executor)
     pipeline = SignalPipeline(signal_repository, engine, trade_manager)
-    logger.info("Execution mode: %s", config.execution_mode)
+    logger.info("Channel 1 broker: %s", channel_1_broker)
 
     # One subscription per enabled channel. Channel 1 is the full trading
     # pipeline; channel 2 (optional) is parse-only, storing into its own

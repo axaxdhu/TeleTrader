@@ -1,9 +1,13 @@
 """Executor selection from configuration.
 
-The composition root asks for *an* :class:`Executor` and gets the one named by
-``EXECUTION_MODE`` — ``dry_run`` today, ``kite`` later. Putting the choice here
-(not in the engine or the listener) means switching from a dry run to live
-trading is a one-line config change and nothing upstream knows the difference.
+The composition root asks for *an* :class:`Executor` for a given broker mode and
+gets the matching implementation — ``dry_run``, ``kite``, or ``fyers``. Putting
+the choice here (not in the engine or the listener) means switching a channel's
+broker is a one-line config change and nothing upstream knows the difference.
+
+The mode is passed explicitly so each channel can be built with its own broker
+(``Config.broker_for(channel)``); it defaults to the global ``execution_mode`` for
+single-broker setups.
 """
 
 from __future__ import annotations
@@ -16,30 +20,33 @@ from ..config import Config
 from .base import Executor
 from .dry_run import MODE as DRY_RUN_MODE
 from .dry_run import DryRunExecutor
+from .fyers import MODE as FYERS_MODE
+from .fyers import FyersExecutor
 from .kite import MODE as KITE_MODE
 from .kite import KiteExecutor
 from .repository import ExecutionRepository
 
-__all__ = ["KITE_MODE", "create_executor"]
+__all__ = ["FYERS_MODE", "KITE_MODE", "create_executor"]
 
 
 def create_executor(
     config: Config,
     repository: ExecutionRepository,
     *,
+    mode: str | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> Executor:
-    """Build the :class:`Executor` named by ``config.execution_mode``.
+    """Build the :class:`Executor` for ``mode`` (default: ``config.execution_mode``).
 
-    This is the only place the config string maps to a class, so switching
-    between a dry run and live Kite trading is purely a configuration change.
-    Raises :class:`ValueError` for anything unrecognised — though config
-    validation should reject unknown modes before this is reached.
+    This is the only place a broker mode maps to a class, so switching a channel
+    between a dry run and a live broker is purely a configuration change. Raises
+    :class:`ValueError` for anything unrecognised — though config validation should
+    reject unknown modes before this is reached.
     """
-    mode = config.execution_mode
-    if mode == DRY_RUN_MODE:
+    resolved = mode or config.execution_mode
+    if resolved == DRY_RUN_MODE:
         return DryRunExecutor(repository, clock=clock)
-    if mode == KITE_MODE:
+    if resolved == KITE_MODE:
         return KiteExecutor(
             repository,
             api_key=config.kite_api_key,
@@ -47,4 +54,12 @@ def create_executor(
             tz=ZoneInfo(config.market_timezone),
             clock=clock,
         )
-    raise ValueError(f"Unknown execution mode: {mode!r}")
+    if resolved == FYERS_MODE:
+        return FyersExecutor(
+            repository,
+            app_id=config.fyers_app_id,
+            access_token=config.fyers_access_token,
+            tz=ZoneInfo(config.market_timezone),
+            clock=clock,
+        )
+    raise ValueError(f"Unknown execution mode: {resolved!r}")

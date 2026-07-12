@@ -11,11 +11,17 @@ message now runs the full path *parse → evaluate → store → execute* via th
 
 The trade engine is the decision layer only — it never talks to a broker and
 never places orders. Accepted orders go to a broker-independent **execution
-layer** (Phase 4): an `Executor` chosen by `EXECUTION_MODE`. The first
-implementation, `DryRunExecutor`, validates an order, logs exactly what *would*
-be submitted, and records the attempt to SQLite — without contacting any broker
-or simulating a market. Live execution (`KiteExecutor`, `EXECUTION_MODE=kite`)
-lands in Phase 5 behind the same interface.
+layer**: an `Executor` chosen by broker mode. `DryRunExecutor` (`dry_run`)
+validates an order, logs exactly what *would* be submitted, and records the
+attempt to SQLite — without contacting any broker. Two live executors implement
+the same interface: `KiteExecutor` (`kite`, Zerodha) and `FyersExecutor`
+(`fyers`), each resolving the exact broker symbol/expiry from that broker's
+instrument master and managing protective SL-M + target orders with app-side OCO.
+
+The broker is selectable **per channel** (`CHANNEL_1_BROKER` / `CHANNEL_2_BROKER`,
+falling back to the global `EXECUTION_MODE`), so different channels can trade
+through different brokers — switching a channel's broker is a one-line config
+change and nothing upstream (engine, pipeline, listener) is aware of it.
 
 ## Project structure
 
@@ -36,7 +42,7 @@ TeleTrader/
         ├── repository.py        # Signal persistence + dedupe
         ├── lot_size.py          # LotSizeProvider (config now, broker later)
         ├── trade_engine.py      # Business-logic decision layer (no broker)
-        ├── execution/           # Order execution layer (DryRunExecutor; Kite later)
+        ├── execution/           # Order execution layer (DryRun / Kite / FYERS)
         └── telegram_listener.py # Telethon listener
 ```
 
@@ -66,7 +72,11 @@ Copy `.env.example` to `.env` and fill in the values:
 | `MARKET_OPEN_TIME`       | no       | Trading-hours start, `HH:MM` (default `09:15`)           |
 | `MARKET_CLOSE_TIME`      | no       | Trading-hours end, `HH:MM` (default `15:30`)             |
 | `MARKET_TIMEZONE`        | no       | IANA tz for trading hours (default `Asia/Kolkata`)       |
-| `EXECUTION_MODE`         | no       | Executor to use: `dry_run` (default) or `kite` (not yet implemented) |
+| `EXECUTION_MODE`         | no       | Global default broker: `dry_run` (default), `kite`, or `fyers` |
+| `CHANNEL_1_BROKER`       | no       | Per-channel broker override for channel 1 (falls back to `EXECUTION_MODE`) |
+| `CHANNEL_2_BROKER`       | no       | Per-channel broker override for channel 2 (falls back to `EXECUTION_MODE`) |
+| `KITE_API_KEY` / `KITE_API_SECRET` / `KITE_ACCESS_TOKEN` | if `kite` | Zerodha Kite creds; token is manual/daily (`kite_login.py`) |
+| `FYERS_APP_ID` / `FYERS_SECRET_ID` / `FYERS_ACCESS_TOKEN` | if `fyers` | FYERS creds; token is manual/daily (`fyers_login.py`). Live orders need a whitelisted static IP |
 
 ## Installation
 

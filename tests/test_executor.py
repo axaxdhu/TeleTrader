@@ -245,6 +245,61 @@ def test_factory_builds_kite_executor(repo: ExecutionRepository) -> None:
     assert ex.mode == "kite"
 
 
+def test_factory_builds_fyers_executor(repo: ExecutionRepository) -> None:
+    from teletrader.execution import FyersExecutor
+
+    ex = create_executor(
+        _config(
+            execution_mode="fyers",
+            fyers_app_id="APP-100",
+            fyers_secret_id="s",
+            fyers_access_token="t",
+        ),
+        repo,
+    )
+    assert isinstance(ex, FyersExecutor)
+    assert ex.mode == "fyers"
+
+
+def test_factory_mode_override_selects_per_channel_broker(repo: ExecutionRepository) -> None:
+    from teletrader.execution import DryRunExecutor, KiteExecutor
+
+    # Global default is dry_run, but the explicit mode arg (a channel's broker)
+    # wins — this is how each channel builds its own executor.
+    config = _config(
+        execution_mode="dry_run",
+        kite_api_key="k",
+        kite_api_secret="s",
+        kite_access_token="t",
+    )
+    assert isinstance(create_executor(config, repo), DryRunExecutor)
+    assert isinstance(create_executor(config, repo, mode="kite"), KiteExecutor)
+
+
+def test_broker_for_resolves_override_then_default() -> None:
+    default = _config(execution_mode="dry_run")
+    assert default.broker_for("channel1") == "dry_run"
+
+    overridden = _config(execution_mode="dry_run", channel_1_broker="kite", channel_2_broker="fyers")
+    assert overridden.broker_for("channel1") == "kite"
+    assert overridden.broker_for("channel2") == "fyers"
+    assert overridden.broker_for("channel3") == "dry_run"  # unknown -> global default
+
+
+def test_channel_broker_requires_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A channel routed to fyers must have FYERS creds even if EXECUTION_MODE is dry_run.
+    for var, value in (
+        ("TELEGRAM_API_ID", "1"),
+        ("TELEGRAM_API_HASH", "h"),
+        ("TELEGRAM_PHONE", "+1"),
+        ("TELEGRAM_CHANNEL", "me"),
+        ("CHANNEL_1_BROKER", "fyers"),
+    ):
+        monkeypatch.setenv(var, value)
+    with pytest.raises(ConfigError):
+        Config.from_env()
+
+
 def test_unknown_execution_mode_is_a_config_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

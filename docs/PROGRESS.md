@@ -15,6 +15,7 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | —     | Trade-management commands (Phase 1: parse + state + dry-run) | ✅ Done |
 | —     | Trade-management commands (Phase 2: live Kite — protection, fill, OCO) | ✅ Done (229 total) |
 | —     | Second channel (parse-only) + per-channel switches | ✅ Done (253 total) |
+| —     | FYERS broker + per-channel broker selection | ✅ Done (308 total) |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
 > The trade engine is the broker-agnostic decision layer (it *decides*, it does
@@ -648,9 +649,85 @@ traded**; live trading, likely via **FYERS**, comes later).
 
 **Follow-ups when ch2 goes live (FYERS):** a channel-2 command parser (`Type mistake`
 → cancel) and **trade-level** per-channel isolation (tag `trades` with source so
-management commands act only on same-channel positions); a FYERS `Executor`
-implementation; stock-option symbol/lot resolution (verify the resolver handles
-monthly expiries); decide scale-out vs first-target-only for real orders.
+management commands act only on same-channel positions); ~~a FYERS `Executor`
+implementation~~ (✅ done — see below); ~~stock-option symbol/lot resolution~~
+(✅ the resolver handles monthly expiries); decide scale-out vs first-target-only
+for real orders.
+
+## FYERS broker + per-channel broker selection (completed 2026-07-12)
+
+Added a **second live broker (FYERS)** behind the existing `Executor` seam, and
+made the broker **selectable per channel**, so different channels can trade
+through different brokers (e.g. ch1 → Kite, ch2 → FYERS) — the goal being to
+switch brokers at will. Nothing upstream (Trade Engine, pipeline, listener,
+models) changed: this is the payoff of the broker-agnostic design.
+
+**Decisions (2026-07-12, with the user):** per-channel broker via
+`CHANNEL_N_BROKER` (naming confirmed); FYERS must handle **both index and stock
+options** depending on channel; product type **INTRADAY** (matches Kite MIS + the
+SL-M/target/OCO logic); credentials are **global per broker**, only the routing is
+per-channel. See the `per-channel-broker` memory.
+
+- **`execution/fyers.py`** — `FyersExecutor`, the FYERS twin of `KiteExecutor`
+  behind the same `Executor` interface. Key difference from Kite: FYERS reports
+  business errors in the **response dict** (`{"s": "error", …}`) rather than
+  raising, so both a bad response *and* a raised transport error are translated to
+  the neutral `ExecutionError` hierarchy (`_error_from_response` +
+  `translate_fyers_exception`). `_to_fyers_params` is the only FYERS-specific
+  mapping (numeric `side`/`type` codes, `productType`, `limitPrice`/`stopPrice`).
+  Implements orders, SL-M, `get_order_state` (FYERS status ints → `OrderStatus`),
+  `cancel_order`/`modify_stop_loss`/`modify_target`. Never crashes; logs one
+  `[FYERS]` line per attempt with duration; records to `executions`. SDK
+  (`fyers-apiv3`) imported **lazily** — the module is importable without it and
+  dry-run/other brokers never pay its (heavy) import cost.
+- **`execution/fyers_instruments.py`** — `FyersInstrumentResolver` +
+  `FyersCsvSymbolMaster`. Unlike Kite (instrument dump via API), FYERS publishes
+  its master as **downloadable CSV** (`NSE_FO.csv`); the master source downloads +
+  parses it (cached per trading day, like Kite). Returns the master's own exact
+  symbol ticker (e.g. `NSE:NIFTY2570323900PE`), sidestepping FYERS's differing
+  weekly/monthly symbol formats. The **nearest-expiry-on/after-date** rule works
+  for index (weekly) *and* stock (monthly) options with no special-casing. Reuses
+  the shared `ResolvedInstrument` / `InstrumentResolver` seam. **⚠️ The CSV column
+  indices (centralised as constants) are FYERS's documented layout but the format
+  is unversioned — VERIFY against a live download before trading.**
+- **`fyers_login.py`** (project root) — daily-token helper mirroring
+  `kite_login.py`, for the FYERS auth-code flow (`SessionModel.generate_authcode`
+  → browser login → capture `auth_code` on the local callback → `set_token` +
+  `generate_token` → write `FYERS_ACCESS_TOKEN` into `.env`). Manual login only;
+  no password/2FA automated. Redirect URI defaults to `http://localhost:8765`.
+- **Config** (`config.py`) — `fyers` added to the valid modes; `FYERS_APP_ID` /
+  `FYERS_SECRET_ID` / `FYERS_ACCESS_TOKEN` (required only when a channel uses the
+  fyers broker; fail-fast). **Per-channel routing:** `CHANNEL_1_BROKER` /
+  `CHANNEL_2_BROKER` (optional; fall back to `EXECUTION_MODE`); resolved via
+  `Config.broker_for(channel)`. Credentials are required for **any broker
+  referenced** (global default or a per-channel override).
+- **Factory** (`execution/factory.py`) — `create_executor(config, repo, *,
+  mode=…)` now takes an explicit mode (defaulting to `execution_mode`) and has a
+  `fyers` branch, so each channel builds its own executor from its broker.
+- **`main.py`** — builds channel 1's executor from `config.broker_for("channel1")`
+  and logs it. (Channel 2 stays **parse-only** for now per the locked plan; the
+  per-channel machinery is ready for when ch2 trades — it just needs a trading
+  pipeline, ch2 command parser, and trade-level source isolation.)
+- **Dependency:** `fyers-apiv3==3.1.14` added (`pyproject.toml` / `uv.lock`).
+- **Live-trading prerequisite (operational, not code):** FYERS order placement is
+  only accepted from a **whitelisted static IP** (SEBI/NSE retail-algo rule) set in
+  the FYERS app. Plan is to run on a fixed-IP cloud host (DigitalOcean BLR1
+  droplet) and whitelist its IP. Development/tests/dry-run need none of this.
+- Tests: `test_fyers_executor.py` (~37 — mocked client + fake resolver: success,
+  response-dict rejections/margin/market-closed/no-id, raised timeout/rate-limit/
+  unexpected, resolution + market-tz date, numeric param translation, SL-M,
+  order-state mapping incl. safety, cancel/modify, persistence, `[FYERS]` logging,
+  no-secrets, missing-creds, error translation, engine-has-no-fyers guard, lazy
+  SDK guard); `test_fyers_instruments.py` (13 — nearest-expiry for weekly *and*
+  monthly, CE/PE + strike + underlying isolation, not-found, per-day caching,
+  tolerant date/datetime/epoch parsing, CSV column mapping); plus factory + per-
+  channel broker config tests in `test_executor.py`. Suite **308 passing**
+  (`uv run pytest`).
+
+**To trade a channel on FYERS:** set that channel's broker (e.g.
+`CHANNEL_1_BROKER=fyers`), supply `FYERS_APP_ID`/`FYERS_SECRET_ID`/
+`FYERS_ACCESS_TOKEN` (regenerate the token daily with `fyers_login.py`),
+`AUTO_TRADING=true`, run from the whitelisted static IP, inside market hours.
 
 ## Git state
 
