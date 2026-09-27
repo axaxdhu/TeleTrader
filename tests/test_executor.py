@@ -296,8 +296,10 @@ def test_shadow_mode_does_not_require_fyers_credentials(
         ("CHANNEL_2_BROKER", "fyers_shadow"),
     ):
         monkeypatch.setenv(var, value)
+    # Set empty rather than deleted: `Config.from_env` calls `load_dotenv()`,
+    # which would otherwise restore them from a real `.env` on disk.
     for var in ("FYERS_APP_ID", "FYERS_SECRET_ID", "FYERS_ACCESS_TOKEN"):
-        monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv(var, "")
 
     config = Config.from_env()
 
@@ -339,13 +341,14 @@ def test_channel_broker_requires_credentials(monkeypatch: pytest.MonkeyPatch) ->
         ("CHANNEL_1_BROKER", "fyers"),
     ):
         monkeypatch.setenv(var, value)
-    # `Config.from_env` reads the process environment, which on a configured
-    # machine already holds real FYERS credentials — this test asserts what
-    # happens *without* them, so it has to clear them rather than assume they
-    # are absent. (It silently passed everywhere until it was first run on the
-    # deployed server.)
+    # `Config.from_env` calls `load_dotenv()`, so it reads the real `.env` from
+    # disk — on a configured machine that file holds real FYERS credentials.
+    # Deleting the variables is not enough (load_dotenv would put them straight
+    # back); they are set **empty**, which the config treats as missing and
+    # which load_dotenv will not override. This test silently passed everywhere
+    # until it was first run on the deployed server.
     for var in ("FYERS_APP_ID", "FYERS_SECRET_ID", "FYERS_ACCESS_TOKEN"):
-        monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv(var, "")
 
     with pytest.raises(ConfigError):
         Config.from_env()
