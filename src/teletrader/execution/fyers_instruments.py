@@ -168,11 +168,18 @@ class FyersInstrumentResolver:
         if not query:
             raise InstrumentNotFoundError("No underlying given")
         query = _UNDERLYING_ALIASES.get(query, query)
-        known = self._lot_sizes.keys() | {u for (u, _, _) in self._index}
+        # The master spells some tickers with punctuation (``GVT&D``,
+        # ``BAJAJ-AUTO``), so its keys are normalised the same way the query is —
+        # otherwise a signal could never match them however it was written.
+        known = {
+            _normalise_underlying(name): name
+            for name in self._lot_sizes.keys() | {u for (u, _, _) in self._index}
+        }
         if query in known:
-            return query
+            return known[query]
         candidates = sorted(
-            name for name in known if name.startswith(query) or query.startswith(name)
+            name for key, name in known.items()
+            if key.startswith(query) or query.startswith(key)
         )
         if len(candidates) == 1:
             logger.info("Matched underlying %r -> %s", underlying, candidates[0])
@@ -339,6 +346,18 @@ _UNDERLYING_ALIASES: dict[str, str] = {
     "TATAMOTOR": "TMPV",
     "TATAMOTORSPV": "TMPV",
     "TATAMOTORSPASSENGERVEHICLES": "TMPV",
+    # Spellings taken from real channel-2 history: the channel abbreviates
+    # (``Kpitech``), misspells (``Hyndai``, ``Britania``), or uses the brand
+    # rather than the listed company (``Airtel`` -> Bharti Airtel).
+    "TININDIA": "TIINDIA",
+    "TUBEINVESTMENTS": "TIINDIA",
+    "KPITECH": "KPITTECH",
+    "HYNDAI": "HYUNDAI",
+    "BRITANIA": "BRITANNIA",
+    "ATHERENGG": "ATHERENERG",
+    "ATHER": "ATHERENERG",
+    "AIRTEL": "BHARTIARTL",
+    "BHARTIAIRTEL": "BHARTIARTL",
 }
 
 

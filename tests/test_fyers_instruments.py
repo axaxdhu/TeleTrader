@@ -303,3 +303,35 @@ def test_exchange_comes_from_the_symbol_not_the_numeric_column() -> None:
         )
     )
     assert resolver.resolve("COFORGE", 1500, "CE", on_date=ON).exchange == "NSE"
+
+
+PUNCTUATED_ROWS: list[dict[str, Any]] = [
+    _row("GVT&D", "CE", 4500, "NSE:GVT&D26JUL4500CE", date(2026, 7, 31), lot_size=125),
+    _row("BAJAJ-AUTO", "CE", 9000, "NSE:BAJAJ-AUTO26JUL9000CE", date(2026, 7, 31), lot_size=75),
+    _row("TIINDIA", "CE", 2800, "NSE:TIINDIA26JUL2800CE", date(2026, 7, 31), lot_size=200),
+    _row("KPITTECH", "CE", 1400, "NSE:KPITTECH26JUL1400CE", date(2026, 7, 31), lot_size=400),
+    _row("BHARTIARTL", "CE", 2000, "NSE:BHARTIARTL26JUL2000CE", date(2026, 7, 31), lot_size=475),
+]
+
+
+def _punctuated_resolver() -> FyersInstrumentResolver:
+    return FyersInstrumentResolver(FakeSource(PUNCTUATED_ROWS))
+
+
+@pytest.mark.parametrize(
+    ("spoken", "lot_size"),
+    [
+        # The master spells these with punctuation; normalising only the query
+        # meant they could never be matched however the signal was written.
+        ("Gvt &D", 125),
+        ("GVT&D", 125),
+        ("Bajaj auto", 75),
+        ("BAJAJ-AUTO", 75),
+        # Spellings taken from real channel-2 messages.
+        ("Tin india", 200),
+        ("Kpitech", 400),
+        ("Airtel", 475),
+    ],
+)
+def test_real_channel2_spellings_resolve(spoken: str, lot_size: int) -> None:
+    assert _punctuated_resolver().lot_size_for(spoken, on_date=ON) == lot_size

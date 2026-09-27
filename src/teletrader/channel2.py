@@ -61,6 +61,15 @@ _HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Chatter the channel puts *in front of* a signal, sometimes on its own line and
+# sometimes running straight into the header ("One more 23300 ce above 131").
+# Stripping it keeps the lead-in from being read as the instrument's name — a
+# real message posted this way was stored with the underlying "ONE MORE".
+_LEAD_IN_RE = re.compile(
+    r"^(?:one\s+more|another\s+one|another|next\s+one|next|also|and)\b[\s,:;.-]*",
+    re.IGNORECASE,
+)
+
 # Field lines, matched anywhere in the message regardless of order. A stray
 # leading dot (".lot 65", seen in real messages) is tolerated.
 _SL_RE = re.compile(rf"^\.?\s*SL\s+(?P<sl>{_NUM})$", re.IGNORECASE)
@@ -92,9 +101,16 @@ def parse_channel2_signal(message: str | None) -> Signal | None:
     target_open_ended = False
 
     for line in lines:
-        if header_match is None and (match := _HEADER_RE.match(line)):
-            header_match = match
-            continue
+        if header_match is None:
+            # Try the line as posted first, then with a lead-in stripped, so a
+            # header that carries chatter ("One more <strike> ce above ...") is
+            # not credited with an instrument name it never had.
+            match = _HEADER_RE.match(line) or _HEADER_RE.match(
+                _LEAD_IN_RE.sub("", line, count=1)
+            )
+            if match and not _LEAD_IN_RE.match(match.group("underlying").strip()):
+                header_match = match
+                continue
         if sl is None and (match := _SL_RE.match(line)):
             sl = float(match.group("sl"))
             continue

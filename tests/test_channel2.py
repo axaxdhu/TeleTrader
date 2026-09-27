@@ -176,3 +176,42 @@ def test_signal_like_misses_are_flagged(message: str) -> None:
 )
 def test_chatter_is_not_flagged(message: str | None) -> None:
     assert looks_like_signal(message) is False
+
+
+# --- Regressions found in real channel-2 history ------------------------------
+#
+# These messages were taken from the live database (136 signals, Jul-Sep 2026),
+# so each one is a shape the channel actually posts.
+
+
+def test_lead_in_running_into_the_header_is_not_read_as_the_instrument() -> None:
+    # Posted as "One more 23300 ce above 131" with no underlying at all. It was
+    # previously stored with the instrument "ONE MORE". Lot 65 marks it as NIFTY,
+    # but inferring the instrument from a lot size is how you buy the wrong thing
+    # — so this is rejected and surfaces as a miss for the user to eyeball.
+    message = "One more 23300 ce above 131\n\nLot 65\n\nTarget 142, 155, 170++\n\nSl 120"
+
+    assert parse_channel2_signal(message) is None
+    assert looks_like_signal(message) is True
+
+
+@pytest.mark.parametrize(
+    ("message", "underlying", "strike"),
+    [
+        ("Tin india 2800 ce above 81\n\nSl 74\n\nTarget 86, 92++", "TIN INDIA", 2800),
+        ("Gvt &D 4500 ce above 200\n\nTarget 210, 225\n\nSl 188", "GVT &D", 4500),
+        (
+            "Oil india 480 ce above 12\n\nLot 1500\n\nTarget 14, 16\n\nSl 10",
+            "OIL INDIA",
+            480,
+        ),
+    ],
+)
+def test_real_multi_word_stock_signals_still_parse(
+    message: str, underlying: str, strike: int
+) -> None:
+    signal = parse_channel2_signal(message)
+
+    assert signal is not None
+    assert signal.underlying == underlying
+    assert signal.strike == strike

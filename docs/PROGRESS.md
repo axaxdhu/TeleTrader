@@ -17,7 +17,7 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | —     | Second channel (parse-only) + per-channel switches | ✅ Done (253 total) |
 | —     | FYERS broker + per-channel broker selection | ✅ Done (308 total) |
 | —     | Telegram bot notifications (signal + outcome) | ✅ Done (322 total) |
-| —     | Channel 2 shadow mode (FYERS payload, no order) + broker lot sizes | ✅ Done (404 total) |
+| —     | Channel 2 shadow mode (FYERS payload, no order) + broker lot sizes | ✅ Done (415 total) |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
 > The trade engine is the broker-agnostic decision layer (it *decides*, it does
@@ -811,7 +811,16 @@ the Telegram bot; alert only on *signal-like* parse misses (not all chatter).
   name (`Apollo` → APOLLOHOSP + APOLLOTYRE) **raises** rather than guessing —
   buying the wrong company is far worse than reporting an unclear name. Also adds
   `lot_size_for(underlying, *, on_date)`.
-  **Verified against the live master** (81,174 contracts, 216 underlyings):
+  **Validated against 136 real channel-2 signals** (the live droplet database,
+  13 Jul - 25 Sep 2026, 70 distinct underlyings): **98% of signals resolve**
+  (133/136). Two fixes came out of that run — the master's own keys are now
+  normalised too (it spells some tickers with punctuation: `GVT&D`,
+  `BAJAJ-AUTO`, which nothing could previously match), and aliases were added for
+  the spellings the channel actually uses (`Tin india`, `Kpitech`, `Hyndai`,
+  `Britania`, `Atherengg`, `Airtel`). The three remaining misses are correct
+  rejections: `NUVAMA` and `EXIDE` have no contract in the master (NSE revises
+  the F&O list), and `ONE MORE` was a parser bug, now fixed.
+  **Also verified against the live master** (81,174 contracts, 216 underlyings):
   all 20 real-world stock names tried resolve correctly. `Tata motors` needed an
   alias of its own — post-demerger the listed F&O entity is **TMPV** (Tata Motors
   Passenger Vehicles, lot 1600), and it is the only Tata Motors contract in the
@@ -828,6 +837,13 @@ the Telegram bot; alert only on *signal-like* parse misses (not all chatter).
   overstate or understate what happened to the money. The trade state machine and
   management commands are deliberately still absent: with no order placed there is
   nothing to manage. Passing no engine/executor keeps the old parse-only shape.
+- **Lead-in bug found in real history** — the channel posts `One more 23300 ce
+  above 131`, chatter running straight into the header with **no underlying at
+  all**; the parser credited it to an instrument named `ONE MORE` (one such row is
+  in the live database). A lead-in prefix is now stripped before the header is
+  matched, and such a message is **rejected** rather than parsed: the lot size
+  (65) marks it as NIFTY, but inferring an instrument from a lot size is how you
+  buy the wrong thing. It surfaces as a MISSED alert instead.
 - **Missed-signal detection** — `looks_like_signal()` (`channel2.py`) flags a
   message carrying an option contract or an `Sl`/`Target` label that the parser
   rejected; narration (`target done`, `sl hit`, `type mistake`, `cmp <n>`) is
@@ -845,7 +861,7 @@ the Telegram bot; alert only on *signal-like* parse misses (not all chatter).
   and daily token as live.
 - Tests: `test_shadow_executor.py` (22), `test_lot_size.py` (11), plus additions to
   `test_channel2.py`, `test_channel2_pipeline.py`, `test_fyers_instruments.py`,
-  `test_notifier.py`, `test_executor.py`. Suite **404 passing** (`uv run pytest`).
+  `test_notifier.py`, `test_executor.py`. Suite **415 passing** (`uv run pytest`).
 
 **Still open before ch2 goes live (`fyers`):** the trade manager must cover ch2
 (protective SL-M + target with OCO, fill polling) — without it a live entry is
@@ -915,7 +931,7 @@ management commands act only on same-channel positions); a **ch2 command parser*
 
 ## Next
 
-*(reviewed 2026-09-28; suite 404 passing)*
+*(reviewed 2026-09-28; suite 415 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.
