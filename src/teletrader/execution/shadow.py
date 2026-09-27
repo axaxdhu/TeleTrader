@@ -31,16 +31,19 @@ from .fyers import Clock, FyersClient, FyersExecutor
 from .kite_instruments import InstrumentResolver
 from .kite_instruments import ResolvedInstrument
 from .repository import ExecutionRepository
-from .exceptions import AuthenticationError
+from .exceptions import AuthenticationError, InvalidOrderError
 from .models import (
     ExecutionResult,
     ExecutionStatus,
     OrderRequest,
     OrderState,
     OrderStatus,
+    OrderType,
+    ShadowLeg,
     ShadowReport,
     TransactionType,
 )
+from .validation import validate_order
 
 __all__ = ["FyersShadowExecutor"]
 
@@ -178,6 +181,7 @@ class FyersShadowExecutor(FyersExecutor):
         lots = order.quantity // lot_size if lot_size else 0
         required, available, ok, note = self._check_funds(order)
         return ShadowReport(
+            protective=self._build_protective_legs(order, instrument, lots, lot_size),
             tradingsymbol=instrument.tradingsymbol,
             exchange=instrument.exchange,
             expiry=instrument.expiry,
@@ -189,6 +193,91 @@ class FyersShadowExecutor(FyersExecutor):
             funds_available=available,
             funds_ok=ok,
             funds_note=note,
+        )
+
+    def _build_protective_legs(
+        self,
+        order: OrderRequest,
+        instrument: ResolvedInstrument,
+        lots: int,
+        lot_size: int,
+    ) -> tuple[ShadowLeg, ...]:
+        """Build the resting stop-loss and target exits the entry would get.
+
+        These mirror what the live path places after a fill: a SELL **SL-M** at
+        the signal's stop and a SELL **LIMIT** at its target, both flattening the
+        long option. They are built and validated here so a shadow run reports
+        the whole position rather than only the way into it — an entry that fills
+        and then cannot be protected is not a trade anyone wants.
+
+        The live path sizes these to the *actual* fill; with nothing filled there
+        is no fill to size to, so the requested quantity is used and the report
+        says so rather than implying otherwise.
+        """
+        legs: list[ShadowLeg] = []
+        for kind, order_type, price in (
+            ("stop-loss", OrderType.SL_M, order.stop_loss),
+            ("target", OrderType.LIMIT, order.target),
+        ):
+            if price is None:
+                legs.append(
+                    ShadowLeg(
+                        kind=kind,
+                        order_type=order_type.value,
+                        price=None,
+                        note=f"No {kind} in the signal — this leg would not be placed.",
+                    )
+                )
+                continue
+            exit_order = self._protective_order(order, order_type, price)
+            try:
+                validate_order(exit_order)
+            except InvalidOrderError as exc:
+                legs.append(
+                    ShadowLeg(
+                        kind=kind,
+                        order_type=order_type.value,
+                        price=price,
+                        accepted=False,
+                        note=f"Would be rejected: {exc}",
+                    )
+                )
+                continue
+            legs.append(
+                ShadowLeg(
+                    kind=kind,
+                    order_type=order_type.value,
+                    price=price,
+                    payload=dict(self._to_fyers_params(exit_order, instrument)),
+                    accepted=True,
+                    note=f"Would rest at {_fmt(price)} for {order.quantity} qty.",
+                )
+            )
+        return tuple(legs)
+
+    @staticmethod
+    def _protective_order(
+        order: OrderRequest, order_type: OrderType, price: float
+    ) -> OrderRequest:
+        """A resting SELL exit flattening the long-option entry.
+
+        Mirrors ``TradeManager._protective_order``: for a target the limit price
+        travels in ``entry_price`` (the field doubles as the order's price), and
+        for a stop it is the ``trigger_price``.
+        """
+        return OrderRequest(
+            symbol=order.symbol,
+            transaction_type=TransactionType.SELL,
+            quantity=order.quantity,
+            order_type=order_type,
+            product=order.product,
+            exchange=order.exchange,
+            entry_price=price if order_type is OrderType.LIMIT else None,
+            trigger_price=price if order_type is OrderType.SL_M else None,
+            signal_id=order.signal_id,
+            underlying=order.underlying,
+            strike=order.strike,
+            option_type=order.option_type,
         )
 
     def _check_funds(
@@ -255,6 +344,7 @@ class FyersShadowExecutor(FyersExecutor):
             "Stop Loss: %s\n"
             "Target: %s\n"
             "Funds: %s\n"
+            "Protection: %s\n"
             "Payload: %s\n"
             "Verdict: %s",
             report.tradingsymbol,
@@ -269,6 +359,7 @@ class FyersShadowExecutor(FyersExecutor):
             _fmt(order.stop_loss),
             _fmt(order.target),
             report.funds_note,
+            " | ".join(f"{leg.kind}: {leg.note}" for leg in report.protective) or "-",
             report.payload,
             result.remarks,
         )

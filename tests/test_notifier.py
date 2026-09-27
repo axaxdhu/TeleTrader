@@ -192,7 +192,7 @@ def test_null_notifier_is_a_noop() -> None:
 
 from datetime import date as _date  # noqa: E402
 
-from teletrader.execution import ShadowReport  # noqa: E402
+from teletrader.execution import ShadowLeg, ShadowReport  # noqa: E402
 
 
 def _shadow_report(**overrides: object) -> ShadowReport:
@@ -208,6 +208,10 @@ def _shadow_report(**overrides: object) -> ShadowReport:
         "funds_available": 50_000.0,
         "funds_ok": True,
         "funds_note": "Sufficient funds.",
+        "protective": (
+            ShadowLeg("stop-loss", "SL-M", 66.0, {"stopPrice": 66.0}, True, "rests at 66"),
+            ShadowLeg("target", "LIMIT", 73.0, {"limitPrice": 73.0}, True, "rests at 73"),
+        ),
     }
     params.update(overrides)
     return ShadowReport(**params)  # type: ignore[arg-type]
@@ -308,3 +312,28 @@ def test_missed_alert_survives_an_empty_message() -> None:
     text = _alert(PipelineResult(PipelineStatus.MISSED, raw_text=None))
 
     assert "(empty)" in text
+
+
+def test_shadow_alert_lists_both_protective_exits() -> None:
+    text = _alert(_shadow_result())
+
+    assert "Exits (placed after the entry fills)" in text
+    assert "stop-loss: SL-M @ 66" in text
+    assert "target: LIMIT @ 73" in text
+
+
+def test_shadow_alert_warns_when_protection_is_incomplete() -> None:
+    # An entry that fills and then cannot be protected is not a working trade —
+    # reporting a plain "would go through" here would be actively misleading.
+    text = _alert(
+        _shadow_result(
+            protective=(
+                ShadowLeg("stop-loss", "SL-M", None, None, False, "No stop-loss in the signal."),
+                ShadowLeg("target", "LIMIT", 73.0, {"limitPrice": 73.0}, True, "rests at 73"),
+            )
+        )
+    )
+
+    assert "PROTECTION INCOMPLETE" in text
+    assert "WOULD GO THROUGH" not in text
+    assert "No stop-loss in the signal." in text

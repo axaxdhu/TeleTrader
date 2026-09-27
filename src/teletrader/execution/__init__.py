@@ -67,6 +67,7 @@ from .models import (
     OrderStatus,
     OrderType,
     ProductType,
+    ShadowLeg,
     ShadowReport,
     TransactionType,
 )
@@ -108,6 +109,7 @@ __all__ = [
     "ProductType",
     "RateLimitError",
     "ResolvedInstrument",
+    "ShadowLeg",
     "ShadowReport",
     "StoredExecution",
     "TransactionType",

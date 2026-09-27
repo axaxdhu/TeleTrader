@@ -179,11 +179,15 @@ def _format_shadow(result: PipelineResult, *, tag: str, broker: str) -> str:
 
     report = execution.shadow
     order = execution.order
-    verdict = (
-        "✅ WOULD GO THROUGH"
-        if execution.status is ExecutionStatus.SUCCESS
-        else f"❌ WOULD BE {execution.status.value}"
-    )
+    if execution.status is not ExecutionStatus.SUCCESS:
+        verdict = f"❌ WOULD BE {execution.status.value}"
+    elif report.fully_protected:
+        verdict = "✅ WOULD GO THROUGH"
+    else:
+        # The entry is fine but a protective leg is not, which means a position
+        # that opens and then cannot be closed on plan. Saying only "would go
+        # through" here would be the most misleading thing this alert could do.
+        verdict = "⚠️ ENTRY OK — PROTECTION INCOMPLETE"
     lines = [
         f"👁 {tag} SHADOW — no order sent",
         f"{signal}",
@@ -206,6 +210,17 @@ def _format_shadow(result: PipelineResult, *, tag: str, broker: str) -> str:
             f"Cost: {_price(report.funds_required)} · Available: {available}"
         )
     lines.append(f"Funds: {report.funds_note}")
+
+    if report.protective:
+        lines.append("")
+        lines.append("Exits (placed after the entry fills):")
+        for leg in report.protective:
+            mark = "✅" if leg.accepted else "❌"
+            price = _price(leg.price)
+            lines.append(f"  {mark} {leg.kind}: {leg.order_type} @ {price}")
+            if not leg.accepted:
+                lines.append(f"     {leg.note}")
+
     lines.append(f"Broker: {broker}")
     return "\n".join(lines)
 

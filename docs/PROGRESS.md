@@ -17,7 +17,7 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | —     | Second channel (parse-only) + per-channel switches | ✅ Done (253 total) |
 | —     | FYERS broker + per-channel broker selection | ✅ Done (308 total) |
 | —     | Telegram bot notifications (signal + outcome) | ✅ Done (322 total) |
-| —     | Channel 2 shadow mode (FYERS payload, no order) + broker lot sizes | ✅ Done (417 total) |
+| —     | Channel 2 shadow mode (FYERS payload, no order) + broker lot sizes | ✅ Done (424 total) |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
 > The trade engine is the broker-agnostic decision layer (it *decides*, it does
@@ -850,6 +850,18 @@ the Telegram bot; alert only on *signal-like* parse misses (not all chatter).
   excluded. Surfaces as `PipelineStatus.MISSED` → a console line and a
   "POSSIBLE SIGNAL NOT PARSED" Telegram alert **quoting the raw text**. Loose
   heuristic on purpose: a false alert costs a glance, a missed signal costs a trade.
+- **Protective exits in the shadow report** (2026-09-28) — the entry is only half
+  the plan: the live path places a resting SELL **SL-M** at the stop and a SELL
+  **LIMIT** at the target *after* the entry fills, as separate orders (FYERS
+  attaches neither to a market entry). Shadow mode now builds and validates both
+  (`ShadowLeg`, `ShadowReport.protective`), mirroring
+  `TradeManager._protective_order` — it needs no `Signal`, since the entry
+  `OrderRequest` already carries stop/target/underlying. The alert lists each leg
+  with its own ✅/❌, and a signal whose stop cannot be placed reports
+  **"⚠️ ENTRY OK — PROTECTION INCOMPLETE"** rather than a plain "would go
+  through": a position that opens and then cannot be closed on plan is not a
+  working trade. Sizing note: the live path sizes these to the *actual* fill;
+  with nothing filled the requested quantity is used and the report says so.
 - **Alerts** (`notifier.py`) — `_format_shadow` renders symbol, exchange, expiry,
   side/type, `qty (lots x lot size)`, entry/SL/target, cost vs. available funds,
   and the verdict; the missed alert quotes the original message (trimmed).
@@ -868,7 +880,7 @@ the Telegram bot; alert only on *signal-like* parse misses (not all chatter).
   systemd crash-looped until the setting was reverted.
 - Tests: `test_shadow_executor.py` (22), `test_lot_size.py` (11), plus additions to
   `test_channel2.py`, `test_channel2_pipeline.py`, `test_fyers_instruments.py`,
-  `test_notifier.py`, `test_executor.py`. Suite **417 passing** (`uv run pytest`).
+  `test_notifier.py`, `test_executor.py`. Suite **424 passing** (`uv run pytest`).
 
 **Still open before ch2 goes live (`fyers`):** the trade manager must cover ch2
 (protective SL-M + target with OCO, fill polling) — without it a live entry is
@@ -938,7 +950,7 @@ management commands act only on same-channel positions); a **ch2 command parser*
 
 ## Next
 
-*(reviewed 2026-09-28; suite 417 passing)*
+*(reviewed 2026-09-28; suite 424 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.

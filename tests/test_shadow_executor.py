@@ -402,3 +402,79 @@ def test_credential_free_client_still_cannot_trade(
     for call in (client.place_order, client.modify_order, client.cancel_order):
         with pytest.raises(AuthenticationError):
             call({})
+
+
+# --- Protective exits ---------------------------------------------------------
+#
+# The entry is only half the plan: the live path places a resting SL-M and a
+# target LIMIT once it fills. Shadow mode builds those too, so "would this trade
+# have worked?" covers the whole position rather than just getting in.
+
+
+def _legs(repository: ExecutionRepository, **overrides: object) -> dict[str, object]:
+    result = _executor(repository).execute(_order(**overrides))
+    assert result.shadow is not None
+    return {leg.kind: leg for leg in result.shadow.protective}
+
+
+def test_both_protective_exits_are_reported(
+    repository: ExecutionRepository,
+) -> None:
+    legs = _legs(repository)
+
+    assert set(legs) == {"stop-loss", "target"}
+    assert legs["stop-loss"].order_type == "SL-M"
+    assert legs["stop-loss"].price == 66.0
+    assert legs["target"].order_type == "LIMIT"
+    assert legs["target"].price == 73.0
+    assert all(leg.accepted for leg in legs.values())
+
+
+def test_protective_payloads_are_real_broker_params(
+    repository: ExecutionRepository,
+) -> None:
+    legs = _legs(repository)
+
+    stop = legs["stop-loss"].payload
+    target = legs["target"].payload
+    assert stop is not None and target is not None
+    # Both flatten the long option: SELL (-1) on the resolved contract.
+    assert stop["side"] == -1 and target["side"] == -1
+    assert stop["symbol"] == target["symbol"] == "NSE:COFORGE26OCT1500CE"
+    # The stop carries its trigger; the target carries its limit price.
+    assert stop["type"] == 3 and stop["stopPrice"] == 66.0
+    assert target["type"] == 1 and target["limitPrice"] == 73.0
+
+
+def test_a_signal_without_a_stop_reports_an_unplaceable_leg(
+    repository: ExecutionRepository,
+) -> None:
+    legs = _legs(repository, stop_loss=None)
+
+    assert legs["stop-loss"].accepted is False
+    assert legs["stop-loss"].payload is None
+    assert "would not be placed" in legs["stop-loss"].note
+    assert legs["target"].accepted is True
+
+
+def test_fully_protected_is_false_when_a_leg_is_missing(
+    repository: ExecutionRepository,
+) -> None:
+    result = _executor(repository).execute(_order(target=None))
+
+    assert result.shadow is not None
+    # The entry itself is still fine — the position is what is incomplete.
+    assert result.status is ExecutionStatus.SUCCESS
+    assert result.shadow.fully_protected is False
+
+
+def test_protective_exits_never_reach_the_broker(
+    repository: ExecutionRepository,
+) -> None:
+    # The fake client raises on place_order; building two more orders must not
+    # tempt anything into submitting them.
+    client = ExplodingFyers(funds=_funds(50_000.0))
+    result = _executor(repository, client=client).execute(_order())
+
+    assert result.status is ExecutionStatus.SUCCESS
+    assert len(result.shadow.protective) == 2  # type: ignore[union-attr]

@@ -20,6 +20,7 @@ from typing import Any
 
 __all__ = [
     "ExecutionResult",
+    "ShadowLeg",
     "ShadowReport",
     "ExecutionStatus",
     "ManagementAction",
@@ -111,6 +112,25 @@ class OrderRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ShadowLeg:
+    """One protective order a shadow run built and withheld.
+
+    A live entry is only half the plan: the stop-loss and target are placed as
+    **separate** orders once the entry fills, and each can be refused on its own
+    terms (a stop the wrong side of the price, a limit off the tick). Reporting
+    them beside the entry is what makes "would this trade have worked?" a
+    question about the whole position rather than just getting in.
+    """
+
+    kind: str  # "stop-loss" / "target"
+    order_type: str
+    price: float | None
+    payload: Mapping[str, Any] | None = None
+    accepted: bool = False
+    note: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ShadowReport:
     """What a *shadow* execution found on the way to the broker's door.
 
@@ -138,6 +158,18 @@ class ShadowReport:
     funds_available: float | None = None
     funds_ok: bool | None = None
     funds_note: str = ""
+    #: The resting protective exits that would follow the entry, in the order
+    #: the live path places them (stop-loss, then target).
+    protective: tuple[ShadowLeg, ...] = ()
+
+    @property
+    def fully_protected(self) -> bool:
+        """Whether both protective legs would be accepted.
+
+        A position whose stop would be refused is not a working trade, however
+        cleanly the entry goes in.
+        """
+        return bool(self.protective) and all(leg.accepted for leg in self.protective)
 
 
 @dataclass(frozen=True, slots=True)
