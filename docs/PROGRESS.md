@@ -17,7 +17,7 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | —     | Second channel (parse-only) + per-channel switches | ✅ Done (253 total) |
 | —     | FYERS broker + per-channel broker selection | ✅ Done (308 total) |
 | —     | Telegram bot notifications (signal + outcome) | ✅ Done (322 total) |
-| —     | Channel 2 shadow mode (FYERS payload, no order) + broker lot sizes | ✅ Done (403 total) |
+| —     | Channel 2 shadow mode (FYERS payload, no order) + broker lot sizes | ✅ Done (404 total) |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
 > The trade engine is the broker-agnostic decision layer (it *decides*, it does
@@ -811,11 +811,12 @@ the Telegram bot; alert only on *signal-like* parse misses (not all chatter).
   name (`Apollo` → APOLLOHOSP + APOLLOTYRE) **raises** rather than guessing —
   buying the wrong company is far worse than reporting an unclear name. Also adds
   `lot_size_for(underlying, *, on_date)`.
-  **Verified against the live master** (81,174 contracts, 216 underlyings) on
-  2026-09-27: 19 of 20 real-world stock names resolve, the exception being
-  `Tata motors`, which has **no F&O contract listed** (the master carries
-  TATACONSUM/TATAELXSI/TATAPOWER/TATASTEEL only) — a correct miss, not a gap.
-  The alias table is expected to grow as shadow alerts reveal new names.
+  **Verified against the live master** (81,174 contracts, 216 underlyings):
+  all 20 real-world stock names tried resolve correctly. `Tata motors` needed an
+  alias of its own — post-demerger the listed F&O entity is **TMPV** (Tata Motors
+  Passenger Vehicles, lot 1600), and it is the only Tata Motors contract in the
+  master, so the mapping is unambiguous. The alias table is expected to keep
+  growing as shadow alerts reveal new names.
 - **Exchange from the symbol** — the master's exchange column is a numeric code
   (`10`); the tradingsymbol already carries the real one (`NSE:...`), so that is
   used instead and alerts no longer read "(10)".
@@ -844,7 +845,7 @@ the Telegram bot; alert only on *signal-like* parse misses (not all chatter).
   and daily token as live.
 - Tests: `test_shadow_executor.py` (22), `test_lot_size.py` (11), plus additions to
   `test_channel2.py`, `test_channel2_pipeline.py`, `test_fyers_instruments.py`,
-  `test_notifier.py`, `test_executor.py`. Suite **403 passing** (`uv run pytest`).
+  `test_notifier.py`, `test_executor.py`. Suite **404 passing** (`uv run pytest`).
 
 **Still open before ch2 goes live (`fyers`):** the trade manager must cover ch2
 (protective SL-M + target with OCO, fill polling) — without it a live entry is
@@ -914,7 +915,7 @@ management commands act only on same-channel positions); a **ch2 command parser*
 
 ## Next
 
-*(reviewed 2026-09-27; suite 403 passing)*
+*(reviewed 2026-09-28; suite 404 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.

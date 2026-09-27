@@ -262,6 +262,7 @@ ALIAS_ROWS: list[dict[str, Any]] = [
     _row("SBIN", "CE", 800, "NSE:SBIN26JUL800CE", date(2026, 7, 31), lot_size=750),
     _row("SBICARD", "CE", 800, "NSE:SBICARD26JUL800CE", date(2026, 7, 31), lot_size=800),
     _row("SBILIFE", "CE", 1800, "NSE:SBILIFE26JUL1800CE", date(2026, 7, 31), lot_size=375),
+    _row("TMPV", "CE", 150, "NSE:TMPV26JUL150CE", date(2026, 7, 31), lot_size=1600),
 ]
 
 
@@ -277,6 +278,7 @@ def _alias_resolver() -> FyersInstrumentResolver:
         ("L&T", 175),             # punctuation stripped to an exact ticker
         ("l & t", 175),
         ("Sbi", 750),             # short form that is otherwise ambiguous
+        ("Tata motors", 1600),    # demerged: the listed F&O entity is TMPV
     ],
 )
 def test_spoken_names_resolve_through_aliases(spoken: str, lot_size: int) -> None:

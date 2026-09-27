@@ -332,6 +332,13 @@ _UNDERLYING_ALIASES: dict[str, str] = {
     "SBI": "SBIN",
     "STATEBANK": "SBIN",
     "MARUTISUZUKI": "MARUTI",
+    # Post-demerger, the listed F&O entity is Tata Motors Passenger Vehicles
+    # (TMPV) — the only Tata Motors contract in the master, so a signal saying
+    # "Tata motors" can only mean this one.
+    "TATAMOTORS": "TMPV",
+    "TATAMOTOR": "TMPV",
+    "TATAMOTORSPV": "TMPV",
+    "TATAMOTORSPASSENGERVEHICLES": "TMPV",
 }
 
 
