@@ -32,6 +32,7 @@ from .execution import (
 from .logging_config import get_logger
 from .parser import Action, Signal
 from .repository import DuplicateSignalError, SignalRepository
+from .shadow_repository import ShadowRepository, run_from_execution
 from .trade_engine import TradeDecision, TradeEngine
 from .trade_manager import ManagementOutcome, ManagementReport, TradeManager
 
@@ -258,10 +259,14 @@ class Channel2Pipeline:
         repository: SignalRepository,
         engine: TradeEngine | None = None,
         executor: Executor | None = None,
+        shadow_repository: ShadowRepository | None = None,
     ) -> None:
         self._repository = repository
         self._engine = engine
         self._executor = executor
+        # Optional: records each withheld order so the end-of-day job can price
+        # the day. Without it shadow mode still alerts, it just cannot be scored.
+        self._shadow_repository = shadow_repository
 
     def process(
         self, text: str | None, *, when: datetime | None = None
@@ -303,6 +308,7 @@ class Channel2Pipeline:
 
         order = build_order_request(signal, decision, signal_id=stored.id)
         execution = self._executor.execute(order)
+        self._record_shadow(execution, signal_id=stored.id, when=when)
         # SHADOWED is reported only when the executor really did withhold the
         # order; a channel switched to a live broker reports EXECUTED, so the
         # status never overstates or understates what happened to the money.
@@ -318,3 +324,23 @@ class Channel2Pipeline:
             decision=decision,
             execution=execution,
         )
+
+    def _record_shadow(
+        self, execution: ExecutionResult, *, signal_id: int, when: datetime | None
+    ) -> None:
+        """Persist a withheld order so the day can be priced later.
+
+        Best-effort: a failure to record must never cost the user the alert,
+        which is the part they act on.
+        """
+        if self._shadow_repository is None:
+            return
+        run = run_from_execution(
+            execution, source=self._repository.source, signal_id=signal_id
+        )
+        if run is None:
+            return  # not a shadow run (dry run, live order, or rejected pre-resolution)
+        try:
+            self._shadow_repository.add(run, created_at=when)
+        except Exception:  # noqa: BLE001 — never lose the alert over bookkeeping
+            logger.exception("Could not record the shadow run for signal %s", signal_id)

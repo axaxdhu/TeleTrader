@@ -18,6 +18,7 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | —     | FYERS broker + per-channel broker selection | ✅ Done (308 total) |
 | —     | Telegram bot notifications (signal + outcome) | ✅ Done (322 total) |
 | —     | Channel 2 shadow mode (FYERS payload, no order) + broker lot sizes | ✅ Done (424 total) |
+| —     | End-of-day shadow P&L summary (would the day have been profitable?) | ✅ Done (448 total) |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
 > The trade engine is the broker-agnostic decision layer (it *decides*, it does
@@ -888,6 +889,68 @@ unprotected; **trade-level source isolation** (tag `trades` with their channel s
 management commands act only on same-channel positions); a **ch2 command parser**
 (`Type mistake` → cancel); and a decision on **scale-out vs first-target-only**.
 
+## End-of-day shadow P&L (completed 2026-09-28)
+
+Shadow mode answers "would this order have been accepted?". This answers the
+question that actually decides whether the channel is worth trading: **would
+following it have made money?** After the close, every shadowed trade is replayed
+against its own contract's intraday candles and the day is totalled into one
+Telegram summary.
+
+```
+📊 channel2 — 28 Sep 2026 (shadow)
+3 signal(s) · 1 target · 1 stopped · 1 open
+
+  ✅ COFORGE +1,425  (70 → 73, target)
+  ❌ NIFTY -715  (131 → 120, stopped)
+  ⏳ APOLLOHOSP +562  (307 → 311.50, open)
+
+Gross: +1,272 on 80,140 deployed
+
+Assumes entry filled at the signal's price; a bar spanning both stop and target
+counts as stopped; gross of brokerage and taxes.
+```
+
+- **Migration v9 — `shadow_runs`.** `executions` stores a verdict and a prose
+  remark: enough to audit an attempt, not enough to *price* one. The resolved
+  contract, quantity and the three prices now survive as columns in their own
+  table (only shadow runs have them, and a day's report is one indexed scan).
+  `outcome`/`exit_price`/`pnl` stay NULL until scored, so "not yet judged" is
+  never mistaken for "broke even". `SCHEMA_VERSION` now **9**.
+- **`shadow_repository.py`** — `ShadowRun` / `StoredShadowRun` / `Outcome`
+  (`target` / `stopped` / `open` / `unknown`), day-scoped in the market timezone
+  so a report never straddles a UTC midnight mid-session.
+  `run_from_execution()` returns `None` for anything without a shadow report, so
+  a dry run or a live order is never priced as a shadow trade.
+- **`eod.py` — the scorer.** Walks the contract's minute candles forward from the
+  signal's arrival: stop hit → stopped at the stop; target reached → taken at the
+  target; neither → marked to the close. **Deliberately pessimistic where the data
+  is ambiguous**, which is where a backtest usually lies:
+  - a bar whose range spans *both* stop and target counts as **stopped** (a minute
+    candle records a range, not the order its extremes occurred in);
+  - candles from before the signal arrived are ignored;
+  - a contract whose data cannot be fetched is reported **unscored**, not dropped
+    and not assumed flat, so the trade count always matches reality.
+- **`FyersCandleSource`** — the broker's own `history` endpoint, so prices are what
+  that contract actually traded at. One fetch per symbol per day (cached). A
+  malformed bar is skipped rather than losing the day.
+- **Assumptions travel with the number** — the summary always states them
+  (entry assumed filled at the signal's price; ambiguous bar = stopped; gross of
+  costs). A P&L whose caveats are invisible is worse than no P&L, and these are
+  asserted by a test so they cannot quietly disappear.
+- **Wiring** — `Channel2Pipeline` takes an optional `ShadowRepository` and records
+  each withheld order; a recording failure is caught and logged, never costing the
+  user the alert they act on. `main.py` injects it.
+- **`eod_report.py` + `deploy/teletrader-eod.{service,timer}`** — a one-shot unit
+  fired at **15:35 IST, Mon-Fri** (`Persistent=true`, so a missed run still sends).
+  `--print` renders without sending; `--date` re-scores an earlier day. With no
+  FYERS token the report **still arrives**, with every trade unscored and saying so.
+- Tests: `test_eod.py` (21) + pipeline recording tests. Suite **448 passing**.
+
+**Known limits (stated, not hidden):** entry slippage is not modelled; brokerage,
+STT and exchange charges are not deducted; and an `open` trade is marked to the
+close rather than to a real square-off.
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -950,7 +1013,7 @@ management commands act only on same-channel positions); a **ch2 command parser*
 
 ## Next
 
-*(reviewed 2026-09-28; suite 424 passing)*
+*(reviewed 2026-09-28; suite 448 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.

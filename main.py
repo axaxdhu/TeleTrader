@@ -25,6 +25,7 @@ from teletrader.logging_config import configure_logging, get_logger
 from teletrader.notifier import create_notifier
 from teletrader.pipeline import Channel2Pipeline, SignalPipeline
 from teletrader.repository import SignalRepository
+from teletrader.shadow_repository import ShadowRepository
 from teletrader.telegram_listener import ChannelSubscription, TelegramListener
 from teletrader.trade_engine import TradeEngine
 from teletrader.trade_manager import TradeManager
@@ -107,12 +108,17 @@ def main() -> int:
         channel_2_engine = TradeEngine(
             config, channel2_repository, lot_size_provider=lot_size_provider
         )
+        # Shadow runs are recorded so `eod_report.py` can price the day after the
+        # close: what would have hit its target, what would have been stopped.
         subscriptions.append(
             ChannelSubscription(
                 "channel2",
                 config.channel_2,
                 Channel2Pipeline(
-                    channel2_repository, channel_2_engine, channel_2_executor
+                    channel2_repository,
+                    channel_2_engine,
+                    channel_2_executor,
+                    ShadowRepository(connection, tz=market_tz),
                 ),
             )
         )

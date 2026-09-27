@@ -251,3 +251,64 @@ def test_parse_only_mode_still_works_without_an_engine(
     result = _pipeline(connection).process(C2_SIGNAL, when=WHEN)
 
     assert result.status is PipelineStatus.STORED
+
+
+# --- Shadow runs are recorded for end-of-day scoring ---------------------------
+
+
+from teletrader.shadow_repository import ShadowRepository  # noqa: E402
+
+
+def test_shadow_runs_are_recorded_for_scoring(
+    connection: sqlite3.Connection,
+) -> None:
+    shadow_repo = ShadowRepository(connection, tz=timezone.utc)
+    repository = SignalRepository(connection, tz=timezone.utc, source="channel2")
+    engine = TradeEngine(_config(), repository, clock=lambda: WHEN)
+    pipeline = Channel2Pipeline(
+        repository, engine, RecordingExecutor(), shadow_repo
+    )
+
+    pipeline.process(C2_SIGNAL, when=WHEN)
+
+    runs = shadow_repo.for_day(WHEN.date(), source="channel2")
+    assert len(runs) == 1
+    stored = runs[0].run
+    # Everything the end-of-day job needs to price the trade.
+    assert stored.tradingsymbol == "NSE:NIFTY26O0323900PE"
+    assert stored.quantity == 65
+    assert (stored.entry_price, stored.stop_loss, stored.target) == (128.0, 115.0, 140.0)
+    assert runs[0].scored is False  # not judged until the close
+
+
+def test_a_live_order_records_no_shadow_run(connection: sqlite3.Connection) -> None:
+    shadow_repo = ShadowRepository(connection, tz=timezone.utc)
+    repository = SignalRepository(connection, tz=timezone.utc, source="channel2")
+    engine = TradeEngine(_config(), repository, clock=lambda: WHEN)
+    pipeline = Channel2Pipeline(
+        repository, engine, RecordingExecutor(shadow=False), shadow_repo
+    )
+
+    pipeline.process(C2_SIGNAL, when=WHEN)
+
+    # A real order is not a shadow run and must not be priced as one.
+    assert shadow_repo.for_day(WHEN.date(), source="channel2") == []
+
+
+def test_recording_failure_does_not_lose_the_alert(
+    connection: sqlite3.Connection,
+) -> None:
+    class BrokenShadowRepo:
+        def add(self, run: object, *, created_at: object = None) -> int:
+            raise sqlite3.OperationalError("disk full")
+
+    repository = SignalRepository(connection, tz=timezone.utc, source="channel2")
+    engine = TradeEngine(_config(), repository, clock=lambda: WHEN)
+    pipeline = Channel2Pipeline(
+        repository, engine, RecordingExecutor(), BrokenShadowRepo()  # type: ignore[arg-type]
+    )
+
+    result = pipeline.process(C2_SIGNAL, when=WHEN)
+
+    # Bookkeeping must never cost the user the alert they act on.
+    assert result.status is PipelineStatus.SHADOWED

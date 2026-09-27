@@ -190,6 +190,43 @@ _MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE signals ADD COLUMN source TEXT NOT NULL DEFAULT 'channel1';
     """,
+    # v9 — shadow runs, the record an end-of-day P&L is computed from. The
+    # `executions` table stores a verdict and a prose remark, which is enough to
+    # audit an attempt but not to price one: answering "would this day have been
+    # profitable?" needs the resolved contract, the exact quantity, and the three
+    # prices, as columns. They live in their own table rather than as more
+    # nullable columns on `executions` because only shadow runs have them, and
+    # because a day's report is a simple scan of one trading date.
+    #
+    # `outcome`/`exit_price`/`pnl` are filled in later by the end-of-day job once
+    # market data says whether the target or the stop came first; they stay NULL
+    # until then, so an unscored row is distinguishable from a flat one.
+    """
+    CREATE TABLE shadow_runs (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_id      INTEGER REFERENCES signals(id),
+        source         TEXT    NOT NULL,
+        trade_date     TEXT    NOT NULL,
+        created_at     TEXT    NOT NULL,
+        tradingsymbol  TEXT    NOT NULL,
+        exchange       TEXT    NOT NULL,
+        expiry         TEXT    NOT NULL,
+        underlying     TEXT,
+        quantity       INTEGER NOT NULL,
+        lot_size       INTEGER NOT NULL,
+        entry_price    REAL,
+        stop_loss      REAL,
+        target         REAL,
+        accepted       INTEGER NOT NULL,
+        protected      INTEGER NOT NULL,
+        remarks        TEXT,
+        outcome        TEXT,
+        exit_price     REAL,
+        pnl            REAL,
+        scored_at      TEXT
+    );
+    CREATE INDEX idx_shadow_runs_date ON shadow_runs(trade_date, source);
+    """,
 )
 
 #: The schema version this build expects. Equals the number of migrations.

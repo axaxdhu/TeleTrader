@@ -117,6 +117,11 @@ class SignalRepository:
         self._tz = tz
         self._source = source
 
+    @property
+    def source(self) -> str:
+        """The channel this repository is scoped to."""
+        return self._source
+
     def add(self, signal: Signal, *, created_at: datetime | None = None) -> StoredSignal:
         """Persist ``signal`` and return the :class:`StoredSignal` row.
 

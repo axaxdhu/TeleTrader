@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the TeleTrader end-of-day summary after the close
+
+[Timer]
+# 15:35 IST, five minutes after the 15:30 close, on weekdays only.
+# The server runs UTC; OnCalendar is given in IST explicitly so the schedule
+# does not silently shift if the host timezone ever changes.
+OnCalendar=Mon..Fri 15:35
+Timezone=Asia/Kolkata
+# If the box was asleep or down at 15:35, still send the summary on the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

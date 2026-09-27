@@ -63,6 +63,22 @@ Channel 2 accepts only `dry_run` or `fyers_shadow` today: it has no trade manage
 yet, so a live broker there would place entries with **no protective stop-loss or
 target**. The app refuses to start rather than do that.
 
+## End-of-day P&L
+
+After the close, `eod_report.py` replays each of the day's shadowed trades
+against its own contract's intraday candles — stop hit, target reached, or
+neither (marked to the close) — and sends one Telegram summary of what the day
+would have been worth. A systemd timer (`deploy/teletrader-eod.timer`) fires it
+at 15:35 IST on weekdays; `--print` renders it without sending and `--date`
+re-scores an earlier day.
+
+Where the data is ambiguous it is read pessimistically: a bar spanning both the
+stop and the target counts as **stopped**, since a minute candle records a range
+rather than the order its extremes occurred in. The figure assumes the entry
+filled at the signal's stated price and is **gross** of brokerage and taxes —
+the summary says so every time. Scoring needs a valid FYERS token; without one
+the report still arrives with the trades marked unscored.
+
 ## Project structure
 
 ```
