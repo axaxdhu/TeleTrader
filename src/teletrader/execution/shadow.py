@@ -23,11 +23,15 @@ state machine). Nothing here can reach ``place_order``.
 from __future__ import annotations
 
 import time
+from datetime import timezone, tzinfo
 from typing import Any
 
 from ..logging_config import get_logger
-from .fyers import FyersExecutor
+from .fyers import Clock, FyersClient, FyersExecutor
+from .kite_instruments import InstrumentResolver
 from .kite_instruments import ResolvedInstrument
+from .repository import ExecutionRepository
+from .exceptions import AuthenticationError
 from .models import (
     ExecutionResult,
     ExecutionStatus,
@@ -57,6 +61,43 @@ class FyersShadowExecutor(FyersExecutor):
     :class:`FyersExecutor` — including the real symbol master — so the only
     difference from live trading is the missing ``place_order`` call.
     """
+
+    def __init__(
+        self,
+        repository: ExecutionRepository,
+        *,
+        app_id: str | None = None,
+        access_token: str | None = None,
+        client: FyersClient | None = None,
+        resolver: InstrumentResolver | None = None,
+        tz: tzinfo = timezone.utc,
+        clock: Clock | None = None,
+    ) -> None:
+        """Build the executor, tolerating absent FYERS credentials.
+
+        The live executor refuses to construct without a token, and rightly so —
+        it places orders. Shadow mode places none, and the symbol master it
+        resolves contracts from is a public file, so it runs without an account
+        at all: the payload, symbol, expiry and lot size are all still real, and
+        only the funds check is reported as unavailable. That makes shadow mode
+        usable *before* the broker is set up, which is when it is most useful.
+        """
+        if client is None and not (app_id and access_token):
+            logger.warning(
+                "[SHADOW] No FYERS credentials: orders will still be built and "
+                "resolved against the public symbol master, but the funds check "
+                "cannot run."
+            )
+            client = _UnauthenticatedClient()
+        super().__init__(
+            repository,
+            app_id=app_id,
+            access_token=access_token,
+            client=client,
+            resolver=resolver,
+            tz=tz,
+            clock=clock,
+        )
 
     @property
     def mode(self) -> str:
@@ -231,6 +272,32 @@ class FyersShadowExecutor(FyersExecutor):
             report.payload,
             result.remarks,
         )
+
+
+class _UnauthenticatedClient:
+    """Stands in for the FYERS client when there are no credentials.
+
+    It deliberately offers no ``funds`` method, so the balance reads as unknown
+    rather than as a pass, and every trading call raises — nothing here can reach
+    a broker even by accident.
+    """
+
+    def _refuse(self, what: str) -> ExecutionResult:
+        raise AuthenticationError(
+            f"Shadow mode has no FYERS credentials and never {what} anyway."
+        )
+
+    def place_order(self, data: dict[str, Any]) -> dict[str, Any]:
+        self._refuse("places orders")
+
+    def modify_order(self, data: dict[str, Any]) -> dict[str, Any]:
+        self._refuse("modifies orders")
+
+    def cancel_order(self, data: dict[str, Any]) -> dict[str, Any]:
+        self._refuse("cancels orders")
+
+    def orderbook(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {"s": "ok", "orderBook": []}
 
 
 def _available_from_funds(response: Any) -> float | None:

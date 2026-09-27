@@ -280,11 +280,14 @@ def test_factory_builds_fyers_shadow_executor(repo: ExecutionRepository) -> None
     assert ex.mode == "fyers_shadow"
 
 
-def test_shadow_mode_requires_fyers_credentials(
+def test_shadow_mode_does_not_require_fyers_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Shadow mode places no order but still calls FYERS (symbol master, funds),
-    # so a missing daily token must fail at startup rather than mid-session.
+    # Shadow mode places no order, and the symbol master it resolves contracts
+    # from is public — so it must start without a token. Demanding one would
+    # block the very thing it exists for: seeing the real payload *before*
+    # committing to a broker setup. (The live 'fyers' broker still requires
+    # credentials; see test_channel_broker_requires_credentials.)
     for var, value in (
         ("TELEGRAM_API_ID", "1"),
         ("TELEGRAM_API_HASH", "h"),
@@ -293,8 +296,12 @@ def test_shadow_mode_requires_fyers_credentials(
         ("CHANNEL_2_BROKER", "fyers_shadow"),
     ):
         monkeypatch.setenv(var, value)
-    with pytest.raises(ConfigError):
-        Config.from_env()
+    for var in ("FYERS_APP_ID", "FYERS_SECRET_ID", "FYERS_ACCESS_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+
+    config = Config.from_env()
+
+    assert config.broker_for("channel2") == "fyers_shadow"
 
 
 def test_factory_mode_override_selects_per_channel_broker(repo: ExecutionRepository) -> None:

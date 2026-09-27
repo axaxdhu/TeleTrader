@@ -364,3 +364,41 @@ def test_order_state_is_unknown_because_nothing_was_placed(
     state = _executor(repository).get_order_state("whatever")
 
     assert state.status is OrderStatus.UNKNOWN
+
+
+# --- Running without credentials ----------------------------------------------
+#
+# Shadow mode is most useful *before* the broker account is wired up, so it has
+# to work with no token at all: the contract, sizing and payload are all still
+# real, and only the funds check goes unknown.
+
+
+def test_builds_without_credentials(repository: ExecutionRepository) -> None:
+    executor = FyersShadowExecutor(
+        repository, resolver=FakeResolver(), tz=timezone.utc, clock=lambda: NOW
+    )
+
+    result = executor.execute(_order())
+
+    assert result.status is ExecutionStatus.SUCCESS
+    assert result.shadow is not None
+    # The part that matters is still real.
+    assert result.shadow.tradingsymbol == "NSE:COFORGE26OCT1500CE"
+    assert result.shadow.lot_size == 150
+    assert result.shadow.payload["symbol"] == "NSE:COFORGE26OCT1500CE"
+    # The part that needs an account is honestly reported as unknown.
+    assert result.shadow.funds_ok is None
+
+
+def test_credential_free_client_still_cannot_trade(
+    repository: ExecutionRepository,
+) -> None:
+    from teletrader.execution.exceptions import AuthenticationError
+    from teletrader.execution.shadow import _UnauthenticatedClient
+
+    client = _UnauthenticatedClient()
+
+    # Belt and braces: even the stand-in refuses to reach a broker.
+    for call in (client.place_order, client.modify_order, client.cancel_order):
+        with pytest.raises(AuthenticationError):
+            call({})

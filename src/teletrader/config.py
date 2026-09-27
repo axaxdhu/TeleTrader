@@ -223,10 +223,13 @@ def _parse_int(name: str, *, default: int) -> int:
 #: the chosen mode to an executor.
 _EXECUTION_MODES = frozenset({"dry_run", "kite", "fyers", "fyers_shadow"})
 
-#: Modes that talk to FYERS and therefore need FYERS credentials. ``fyers_shadow``
-#: places no order but still calls the API (funds check), so it needs a valid
-#: daily token exactly like the live mode.
-_FYERS_MODES = frozenset({"fyers", "fyers_shadow"})
+#: Modes that require FYERS credentials. Only the live mode does: it places
+#: orders, which is impossible without an authenticated client. ``fyers_shadow``
+#: places nothing, and the symbol master it resolves contracts from is a public
+#: file — so it runs credential-free and simply reports the funds check as
+#: unavailable. Requiring a token there would block the very thing shadow mode
+#: exists for: seeing the real payload before committing to a broker setup.
+_FYERS_MODES = frozenset({"fyers"})
 
 
 def _parse_execution_mode(name: str, *, default: str) -> str:
