@@ -339,6 +339,14 @@ def test_channel_broker_requires_credentials(monkeypatch: pytest.MonkeyPatch) ->
         ("CHANNEL_1_BROKER", "fyers"),
     ):
         monkeypatch.setenv(var, value)
+    # `Config.from_env` reads the process environment, which on a configured
+    # machine already holds real FYERS credentials — this test asserts what
+    # happens *without* them, so it has to clear them rather than assume they
+    # are absent. (It silently passed everywhere until it was first run on the
+    # deployed server.)
+    for var in ("FYERS_APP_ID", "FYERS_SECRET_ID", "FYERS_ACCESS_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+
     with pytest.raises(ConfigError):
         Config.from_env()
 
