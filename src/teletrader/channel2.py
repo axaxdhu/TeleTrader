@@ -37,7 +37,7 @@ import re
 from .logging_config import get_logger
 from .parser import Action, OptionType, Signal
 
-__all__ = ["parse_channel2_signal"]
+__all__ = ["looks_like_signal", "parse_channel2_signal"]
 
 logger = get_logger(__name__)
 
@@ -127,3 +127,51 @@ def _reject(message: str, reason: str) -> None:
         snippet = snippet[:_MAX_LOGGED_CHARS] + "…"
     logger.debug("Rejected channel-2 message (%s): %r", reason, snippet)
     return None
+
+
+# --- Missed-signal detection ------------------------------------------------
+#
+# The parser deliberately rejects anything it cannot read exactly, which protects
+# the account but hides a real risk: this channel's formatting is loose, so a
+# genuine trade can be missed in silence. These patterns pick out messages that
+# *look* like an entry — an option contract, or the stop/target labels — so a
+# miss can be surfaced for review while ordinary chatter stays quiet.
+
+#: An option contract mentioned anywhere: "Coforge 1500 ce", "23900 PE".
+_CONTRACT_MENTION_RE = re.compile(r"\b\d{2,6}\s*(?:ce|pe)\b", re.IGNORECASE)
+
+#: The labels an entry carries. A message with a stop or a target is proposing a
+#: trade, whatever shape the rest of it is in.
+_ENTRY_LABEL_RE = re.compile(r"^\.?\s*(?:sl|target)\b", re.IGNORECASE | re.MULTILINE)
+
+#: Commentary that routinely mentions a contract without proposing an entry:
+#: outcome narration ("target done", "sl hit"), price pings, and cancellations.
+#: These are expected noise and must not be reported as missed signals.
+_NARRATION_RE = re.compile(
+    r"target\s*done|safe\s*target|book(?:ed)?\s*(?:profit|partial)|"
+    r"sl\s*hit|stop\s*hit|hit\s*sl|trail|exit(?:ed)?|"
+    r"type\s*mistake|ignore|cancel|closed|c\s*to\s*c|"
+    r"holding|running|cmp\s+" + _NUM,
+    re.IGNORECASE,
+)
+
+
+def looks_like_signal(message: str | None) -> bool:
+    """Whether ``message`` looks like an entry the parser *should* have read.
+
+    Used to tell a genuine formatting miss apart from the channel's ordinary
+    chatter, so the user is alerted about the former and spared the latter. It is
+    intentionally a heuristic, and a loose one: a false alert costs a glance at a
+    phone, while a missed signal costs a trade. Narration about trades that
+    already exist (targets done, stop hit, cancellations, price pings) is excluded
+    even though it mentions contracts.
+
+    Only meaningful for messages the parser rejected — a parsed signal is not a
+    miss.
+    """
+    if not message or not message.strip():
+        return False
+    text = message.strip()
+    if _NARRATION_RE.search(text):
+        return False
+    return bool(_CONTRACT_MENTION_RE.search(text) or _ENTRY_LABEL_RE.search(text))

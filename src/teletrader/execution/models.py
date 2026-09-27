@@ -12,12 +12,15 @@ values passed between layers.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
+from typing import Any
 
 __all__ = [
     "ExecutionResult",
+    "ShadowReport",
     "ExecutionStatus",
     "ManagementAction",
     "ManagementResult",
@@ -108,6 +111,36 @@ class OrderRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ShadowReport:
+    """What a *shadow* execution found on the way to the broker's door.
+
+    Shadow mode answers a sharper question than a dry run: not "did we build a
+    sane order?" but "would the broker have accepted this one?". Getting there
+    means resolving the real contract and checking the account, so the findings —
+    the concrete symbol, the exchange lot size, the quantity that follows from it,
+    the exact payload that was about to be sent, and whether the account could
+    have afforded it — are carried here for the alert the user reads on their
+    phone.
+
+    ``funds_ok`` is ``None`` when the balance could not be determined (the check
+    was skipped or the call failed); that is reported honestly rather than being
+    treated as a pass.
+    """
+
+    tradingsymbol: str
+    exchange: str
+    expiry: date
+    lot_size: int
+    lots: int
+    quantity: int
+    payload: Mapping[str, Any]
+    funds_required: float | None = None
+    funds_available: float | None = None
+    funds_ok: bool | None = None
+    funds_note: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionResult:
     """The outcome of one execution attempt.
 
@@ -122,6 +155,9 @@ class ExecutionResult:
     remarks: str
     broker_order_id: str | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    #: Set only by the shadow executor — the broker-ready order that was built
+    #: and deliberately not sent. ``None`` for every other executor.
+    shadow: ShadowReport | None = None
 
     @property
     def succeeded(self) -> bool:

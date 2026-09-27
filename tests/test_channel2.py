@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from teletrader.channel2 import parse_channel2_signal
+from teletrader.channel2 import looks_like_signal, parse_channel2_signal
 from teletrader.parser import Action, OptionType
 
 
@@ -135,3 +135,44 @@ def test_missing_stop_loss_is_rejected() -> None:
 
 def test_missing_target_is_rejected() -> None:
     assert parse_channel2_signal("Nifty 23900 pe above 128\n\nSl 115") is None
+
+
+# --- Missed-signal detection --------------------------------------------------
+#
+# The parser rejects anything it cannot read exactly, which is right, but on a
+# loosely formatted channel that silence can hide a real trade. These tests pin
+# the line between "worth a look" and "ordinary chatter".
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Coforge 1500 ce above 70\nsl-- sixty six",          # stop unreadable
+        "Apollo hospital 7500 ce above 307 sl 289",          # all on one line
+        "Buy 23900 PE",                                      # contract, no fields
+        "Target 140, 155",                                   # a stray entry field
+        "Sl 115",
+    ],
+)
+def test_signal_like_misses_are_flagged(message: str) -> None:
+    assert parse_channel2_signal(message) is None
+    assert looks_like_signal(message) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "🔥 Coforge 1500 ce Safe target Done ✔️",  # outcome narration
+        "sl hit on this",
+        "1500 ce booked profit",
+        "Type mistake",
+        "ignore the last one",
+        "Cmp 124",
+        "One more",
+        "good morning traders",
+        "",
+        None,
+    ],
+)
+def test_chatter_is_not_flagged(message: str | None) -> None:
+    assert looks_like_signal(message) is False

@@ -38,7 +38,13 @@ from .exceptions import (
     OrderRejectedError,
     RateLimitError,
 )
-from .factory import FYERS_MODE, KITE_MODE, create_executor
+from .factory import (
+    DRY_RUN_MODE,
+    FYERS_MODE,
+    FYERS_SHADOW_MODE,
+    KITE_MODE,
+    create_executor,
+)
 from .fyers import FyersExecutor
 from .fyers_instruments import (
     FyersCsvSymbolMaster,
@@ -61,9 +67,11 @@ from .models import (
     OrderStatus,
     OrderType,
     ProductType,
+    ShadowReport,
     TransactionType,
 )
 from .repository import ExecutionRepository, StoredExecution
+from .shadow import FyersShadowExecutor
 from .validation import validate_order
 
 __all__ = [
@@ -74,11 +82,14 @@ __all__ = [
     "ExecutionResult",
     "ExecutionStatus",
     "Executor",
+    "DRY_RUN_MODE",
     "DryRunExecutor",
     "FYERS_MODE",
+    "FYERS_SHADOW_MODE",
     "FyersCsvSymbolMaster",
     "FyersExecutor",
     "FyersInstrumentResolver",
+    "FyersShadowExecutor",
     "FyersSymbolSource",
     "InstrumentNotFoundError",
     "InstrumentResolver",
@@ -97,6 +108,7 @@ __all__ = [
     "ProductType",
     "RateLimitError",
     "ResolvedInstrument",
+    "ShadowReport",
     "StoredExecution",
     "TransactionType",
     "create_executor",

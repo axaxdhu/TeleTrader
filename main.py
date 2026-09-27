@@ -14,7 +14,13 @@ from zoneinfo import ZoneInfo
 
 from teletrader.config import Config, ConfigError
 from teletrader.database import connect, initialize
-from teletrader.execution import ExecutionRepository, create_executor
+from teletrader.execution import (
+    DRY_RUN_MODE,
+    FYERS_SHADOW_MODE,
+    ExecutionRepository,
+    create_executor,
+)
+from teletrader.lot_size import BrokerLotSizeProvider, ConfigLotSizeProvider
 from teletrader.logging_config import configure_logging, get_logger
 from teletrader.notifier import create_notifier
 from teletrader.pipeline import Channel2Pipeline, SignalPipeline
@@ -59,19 +65,61 @@ def main() -> int:
     logger.info("Channel 1 broker: %s", channel_1_broker)
 
     # One subscription per enabled channel. Channel 1 is the full trading
-    # pipeline; channel 2 (optional) is parse-only, storing into its own
-    # source-scoped repository so its signals never mix with channel 1's history.
+    # pipeline; channel 2 stores into its own source-scoped repository so its
+    # signals never mix with channel 1's history.
     subscriptions: list[ChannelSubscription] = []
     if config.channel_1_enabled:
         subscriptions.append(ChannelSubscription("channel1", config.channel, pipeline))
     if config.channel_2 is not None and config.channel_2_enabled:
+        channel_2_broker = config.broker_for("channel2")
+        # Channel 2 has no trade state machine yet, so it cannot place protective
+        # stop-loss/target orders. Refusing a live broker here is deliberate:
+        # an unprotected live entry is worse than no entry at all.
+        if channel_2_broker not in (DRY_RUN_MODE, FYERS_SHADOW_MODE):
+            print(
+                f"CHANNEL_2_BROKER={channel_2_broker!r} would place live, "
+                "UNPROTECTED orders: channel 2 has no trade manager yet (no "
+                f"stop-loss or target is placed). Use {FYERS_SHADOW_MODE!r} until "
+                "protection is wired up.",
+                file=sys.stderr,
+            )
+            return 1
         channel2_repository = SignalRepository(
             connection, tz=market_tz, source="channel2"
         )
+        channel_2_executor = create_executor(
+            config, execution_repository, mode=channel_2_broker
+        )
+        # Channel 2 trades stock options, whose lot sizes are not in LOT_SIZES
+        # (it only ever listed the index underlyings). Take them from the same
+        # broker instrument master that resolves the tradingsymbol, falling back
+        # to the configured sizes when the executor has no master (dry run).
+        lot_size_source = getattr(channel_2_executor, "lot_size_source", None)
+        lot_size_provider = (
+            BrokerLotSizeProvider(
+                lot_size_source,
+                fallback=ConfigLotSizeProvider(config.lot_sizes),
+                tz=market_tz,
+            )
+            if lot_size_source is not None
+            else None
+        )
+        channel_2_engine = TradeEngine(
+            config, channel2_repository, lot_size_provider=lot_size_provider
+        )
         subscriptions.append(
             ChannelSubscription(
-                "channel2", config.channel_2, Channel2Pipeline(channel2_repository)
+                "channel2",
+                config.channel_2,
+                Channel2Pipeline(
+                    channel2_repository, channel_2_engine, channel_2_executor
+                ),
             )
+        )
+        logger.info(
+            "Channel 2 broker: %s (lot sizes: %s)",
+            channel_2_broker,
+            "broker master" if lot_size_provider else "config",
         )
 
     if not subscriptions:

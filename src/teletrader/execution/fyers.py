@@ -161,6 +161,17 @@ class FyersExecutor(Executor):
     def mode(self) -> str:
         return MODE
 
+    @property
+    def lot_size_source(self) -> InstrumentResolver:
+        """The instrument master backing this executor.
+
+        Exposed so lot sizes can be sourced from the same master that resolves
+        the tradingsymbol (see
+        :class:`~teletrader.lot_size.BrokerLotSizeProvider`) — one download, one
+        cache, one source of truth for a channel trading stock options.
+        """
+        return self._resolver
+
     def execute(self, order: OrderRequest) -> ExecutionResult:
         """Place ``order`` on FYERS and return a broker-neutral result.
 
@@ -173,19 +184,11 @@ class FyersExecutor(Executor):
         timestamp = self._clock()
         started = time.monotonic()
 
-        try:
-            validate_order(order)
-        except InvalidOrderError as exc:
-            return self._reject(order, started, timestamp, f"Order rejected: {exc}")
+        prepared = self._prepare(order, timestamp=timestamp, started=started)
+        if isinstance(prepared, ExecutionResult):
+            return prepared
+        instrument, params = prepared
 
-        try:
-            instrument = self._resolve(order, on_date=timestamp.astimezone(self._tz).date())
-        except InstrumentNotFoundError as exc:
-            return self._reject(order, started, timestamp, str(exc))
-        except Exception as exc:  # noqa: BLE001 — fetching the master failed
-            return self._fail(order, started, timestamp, exc)
-
-        params = self._to_fyers_params(order, instrument)
         try:
             response = self._fyers.place_order(data=params)
         except Exception as exc:  # noqa: BLE001 — every transport failure becomes a result
@@ -218,6 +221,31 @@ class FyersExecutor(Executor):
             result, started, broker_response=str(response),
             tradingsymbol=instrument.tradingsymbol,
         )
+
+    def _prepare(
+        self, order: OrderRequest, *, timestamp: datetime, started: float
+    ) -> tuple[ResolvedInstrument, dict[str, Any]] | ExecutionResult:
+        """Do everything that precedes submission: validate, resolve, build params.
+
+        Returns the resolved instrument and the ready-to-send FYERS payload, or —
+        if the order cannot get that far — the :class:`ExecutionResult` explaining
+        why (already logged and recorded). Splitting this out lets shadow mode
+        walk the identical path and stop at the door, so what it reports is the
+        real payload and not a reconstruction of one.
+        """
+        try:
+            validate_order(order)
+        except InvalidOrderError as exc:
+            return self._reject(order, started, timestamp, f"Order rejected: {exc}")
+
+        try:
+            instrument = self._resolve(order, on_date=timestamp.astimezone(self._tz).date())
+        except InstrumentNotFoundError as exc:
+            return self._reject(order, started, timestamp, str(exc))
+        except Exception as exc:  # noqa: BLE001 — fetching the master failed
+            return self._fail(order, started, timestamp, exc)
+
+        return instrument, self._to_fyers_params(order, instrument)
 
     # --- Management operations (act on an order that already exists) -----------
 

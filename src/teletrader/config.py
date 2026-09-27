@@ -215,10 +215,18 @@ def _parse_int(name: str, *, default: int) -> int:
 
 
 #: Order-execution modes / broker selectors. ``dry_run`` validates + logs without
-#: sending; ``kite`` and ``fyers`` place live orders. A channel selects one of
-#: these (globally via ``EXECUTION_MODE`` or per-channel via ``CHANNEL_N_BROKER``);
-#: the factory maps the chosen mode to an executor.
-_EXECUTION_MODES = frozenset({"dry_run", "kite", "fyers"})
+#: sending; ``kite`` and ``fyers`` place live orders; ``fyers_shadow`` walks the
+#: entire live FYERS path — real symbol, expiry, lot size and funds check — but
+#: stops immediately before submitting, so it proves an order *would* be accepted
+#: without risking money. A channel selects one of these (globally via
+#: ``EXECUTION_MODE`` or per-channel via ``CHANNEL_N_BROKER``); the factory maps
+#: the chosen mode to an executor.
+_EXECUTION_MODES = frozenset({"dry_run", "kite", "fyers", "fyers_shadow"})
+
+#: Modes that talk to FYERS and therefore need FYERS credentials. ``fyers_shadow``
+#: places no order but still calls the API (funds check), so it needs a valid
+#: daily token exactly like the live mode.
+_FYERS_MODES = frozenset({"fyers", "fyers_shadow"})
 
 
 def _parse_execution_mode(name: str, *, default: str) -> str:
@@ -286,7 +294,7 @@ def _parse_fyers_credentials(referenced_modes: set[str]) -> dict[str, str | None
         "fyers_secret_id": os.getenv("FYERS_SECRET_ID") or None,
         "fyers_access_token": os.getenv("FYERS_ACCESS_TOKEN") or None,
     }
-    if "fyers" in referenced_modes:
+    if referenced_modes & _FYERS_MODES:
         _require_credentials(
             "fyers",
             creds,

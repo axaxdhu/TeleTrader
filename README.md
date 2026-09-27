@@ -23,6 +23,46 @@ falling back to the global `EXECUTION_MODE`), so different channels can trade
 through different brokers — switching a channel's broker is a one-line config
 change and nothing upstream (engine, pipeline, listener) is aware of it.
 
+## Shadow mode (`fyers_shadow`)
+
+A dry run proves the app built a sane order; it never contacts a broker, so it
+cannot tell you whether the broker would have *taken* it. **Shadow mode** answers
+that: it walks the identical live FYERS path — same validation, same symbol
+resolution, same payload — resolving the real tradingsymbol and expiry from the
+live symbol master, sizing the order with the **exchange** lot size, and checking
+your available funds against the premium — then stops immediately before
+`place_order`. Nothing is sent.
+
+Each shadow run reports the broker-ready order (symbol, expiry, quantity and how
+it was derived, prices, cost vs. available funds, and a would-go-through verdict)
+to the console, the logs, and — when `NOTIFY_ENABLED=true` — your Telegram bot.
+It is the ramp-up for a channel you intend to trade: run it for a few weeks,
+read the alerts, and switch that channel to `fyers` once the payloads are
+consistently right.
+
+Shadow mode places no order but still calls FYERS, so it needs the `FYERS_*`
+credentials and a valid daily access token.
+
+### Channel 2
+
+Channel 2 (the looser, mostly stock-option channel) now runs the full
+*parse → store → evaluate → shadow-execute* path rather than parse-only. Two
+consequences are worth knowing:
+
+* Its lot sizes come from the **broker instrument master**, not `LOT_SIZES` —
+  that list only ever covered the index underlyings, so stock signals were
+  rejected as unsized. Underlyings are matched from the spoken name to the
+  exchange ticker (`Apollo hospital` → `APOLLOHOSP`); an ambiguous name is
+  refused rather than guessed.
+* A message that fails to parse but *looks* like an entry (a strike + CE/PE, or
+  an `Sl`/`Target` label) is reported as **MISSED** instead of being silently
+  ignored, so a formatting gap on that channel is visible the day it happens.
+  Ordinary chatter and outcome narration stay quiet.
+
+Channel 2 accepts only `dry_run` or `fyers_shadow` today: it has no trade manager
+yet, so a live broker there would place entries with **no protective stop-loss or
+target**. The app refuses to start rather than do that.
+
 ## Project structure
 
 ```
@@ -72,11 +112,11 @@ Copy `.env.example` to `.env` and fill in the values:
 | `MARKET_OPEN_TIME`       | no       | Trading-hours start, `HH:MM` (default `09:15`)           |
 | `MARKET_CLOSE_TIME`      | no       | Trading-hours end, `HH:MM` (default `15:30`)             |
 | `MARKET_TIMEZONE`        | no       | IANA tz for trading hours (default `Asia/Kolkata`)       |
-| `EXECUTION_MODE`         | no       | Global default broker: `dry_run` (default), `kite`, or `fyers` |
+| `EXECUTION_MODE`         | no       | Global default broker: `dry_run` (default), `kite`, `fyers`, or `fyers_shadow` |
 | `CHANNEL_1_BROKER`       | no       | Per-channel broker override for channel 1 (falls back to `EXECUTION_MODE`) |
-| `CHANNEL_2_BROKER`       | no       | Per-channel broker override for channel 2 (falls back to `EXECUTION_MODE`) |
+| `CHANNEL_2_BROKER`       | no       | Per-channel broker override for channel 2 — `dry_run` or `fyers_shadow` only (see Shadow mode) |
 | `KITE_API_KEY` / `KITE_API_SECRET` / `KITE_ACCESS_TOKEN` | if `kite` | Zerodha Kite creds; token is manual/daily (`kite_login.py`) |
-| `FYERS_APP_ID` / `FYERS_SECRET_ID` / `FYERS_ACCESS_TOKEN` | if `fyers` | FYERS creds; token is manual/daily (`fyers_login.py`). Live orders need a whitelisted static IP |
+| `FYERS_APP_ID` / `FYERS_SECRET_ID` / `FYERS_ACCESS_TOKEN` | if `fyers` or `fyers_shadow` | FYERS creds; token is manual/daily (`fyers_login.py`). Live orders need a whitelisted static IP |
 | `NOTIFY_ENABLED`         | no       | Send push alerts (recognised signal + outcome) via a Telegram bot (default `false`) |
 | `NOTIFY_BOT_TOKEN` / `NOTIFY_CHAT_ID` | if notify | Bot token from @BotFather + your chat id (secret; needed when `NOTIFY_ENABLED=true`) |
 

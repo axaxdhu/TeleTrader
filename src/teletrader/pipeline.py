@@ -19,10 +19,11 @@ from datetime import datetime
 from enum import Enum
 from typing import Protocol
 
-from .channel2 import parse_channel2_signal
+from .channel2 import looks_like_signal, parse_channel2_signal
 from .commands import ManagementCommand, parse_message
 from .execution import (
     ExecutionResult,
+    Executor,
     OrderRequest,
     OrderType,
     ProductType,
@@ -54,6 +55,9 @@ class PipelineStatus(str, Enum):
     NOT_TRADED = "not_traded"    # stored, but the engine declined to trade
     EXECUTED = "executed"        # stored, accepted, and sent to the executor
     STORED = "stored"            # parse-only channel: parsed + stored (not traded)
+    SHADOWED = "shadowed"        # stored, accepted, and costed against the broker
+                                 #   without submitting (shadow mode)
+    MISSED = "missed"            # looked like a signal but could not be parsed
     # --- management-command outcomes ---
     NO_TARGET = "no_target"          # command, but no active trade to act on
     NOT_APPLICABLE = "not_applicable"  # command doesn't fit the trade's state
@@ -85,6 +89,9 @@ class PipelineResult:
     execution: ExecutionResult | None = None
     command: ManagementCommand | None = None
     management: ManagementReport | None = None
+    #: The original message text — carried only for a MISSED result, where the
+    #: unparsed text is the whole point of the report.
+    raw_text: str | None = None
 
 
 class MessageProcessor(Protocol):
@@ -227,32 +234,87 @@ class SignalPipeline:
 
 
 class Channel2Pipeline:
-    """Parse-only pipeline for the second channel: *parse → store → log*.
+    """Channel 2's pipeline: *parse → store → evaluate → shadow-execute*.
 
-    Channel 2 is not traded yet (see the project decisions), so unlike
-    :class:`SignalPipeline` there is no engine, executor, or trade manager — a
-    parsed signal is simply persisted (tagged with its channel via the injected
-    source-scoped :class:`SignalRepository`) for the record and for future use.
-    Same-day duplicates are rejected by the repository; anything that does not
-    parse is ignored as noise.
+    Channel 2 is the channel being promoted to live trading, and this is the
+    ramp-up shape of that path. It runs the same stages as
+    :class:`SignalPipeline` — the engine's gates apply, so a signal outside market
+    hours or over the daily cap is declined exactly as it would be live — but the
+    executor it is given is normally the **shadow** one, which builds the real
+    broker order and stops before submitting. The trade state machine and
+    management commands are deliberately not wired up yet: with no order actually
+    placed there is nothing for them to manage, and pretending otherwise would
+    make the shadow reports less trustworthy, not more.
+
+    Passing no ``engine``/``executor`` keeps the original parse-only behaviour.
+
+    A message that fails to parse but *looks* like an entry is reported as
+    :attr:`PipelineStatus.MISSED` rather than silently ignored — this channel's
+    formatting is loose, and a missed trade must be visible.
     """
 
-    def __init__(self, repository: SignalRepository) -> None:
+    def __init__(
+        self,
+        repository: SignalRepository,
+        engine: TradeEngine | None = None,
+        executor: Executor | None = None,
+    ) -> None:
         self._repository = repository
+        self._engine = engine
+        self._executor = executor
 
     def process(
         self, text: str | None, *, when: datetime | None = None
     ) -> PipelineResult:
-        """Parse one channel-2 message and, if it is a signal, store it."""
+        """Parse one channel-2 message and store, evaluate and cost it."""
         signal = parse_channel2_signal(text)
         if signal is None:
+            if looks_like_signal(text):
+                logger.warning(
+                    "Channel-2 message looks like a signal but did not parse: %r", text
+                )
+                return PipelineResult(PipelineStatus.MISSED, raw_text=text)
             return PipelineResult(PipelineStatus.IGNORED)
+
+        # Evaluate before storing, so the engine's duplicate/daily-count checks
+        # see only prior history (same ordering as the channel-1 pipeline).
+        decision = self._engine.evaluate(signal) if self._engine else None
 
         try:
             stored = self._repository.add(signal, created_at=when)
         except DuplicateSignalError:
             return PipelineResult(PipelineStatus.DUPLICATE, signal=signal)
 
+        if decision is None or self._executor is None:
+            return PipelineResult(
+                PipelineStatus.STORED, signal=signal, stored_id=stored.id
+            )
+
+        if not decision.execute:
+            logger.info(
+                "Channel-2 signal #%s not traded: %s", stored.id, decision.reason
+            )
+            return PipelineResult(
+                PipelineStatus.NOT_TRADED,
+                signal=signal,
+                stored_id=stored.id,
+                decision=decision,
+            )
+
+        order = build_order_request(signal, decision, signal_id=stored.id)
+        execution = self._executor.execute(order)
+        # SHADOWED is reported only when the executor really did withhold the
+        # order; a channel switched to a live broker reports EXECUTED, so the
+        # status never overstates or understates what happened to the money.
+        status = (
+            PipelineStatus.SHADOWED
+            if execution.shadow is not None
+            else PipelineStatus.EXECUTED
+        )
         return PipelineResult(
-            PipelineStatus.STORED, signal=signal, stored_id=stored.id
+            status,
+            signal=signal,
+            stored_id=stored.id,
+            decision=decision,
+            execution=execution,
         )

@@ -101,6 +101,10 @@ class FyersInstrumentResolver:
         self._source = source
         self._cached_on: date | None = None
         self._index: dict[tuple[str, str, int], list[ResolvedInstrument]] = {}
+        #: Underlying (as the master spells it) -> its exchange lot size. Built
+        #: alongside the contract index so lot sizes come from the exchange
+        #: instead of a hand-maintained list.
+        self._lot_sizes: dict[str, int] = {}
 
     def resolve(
         self, underlying: str, strike: int, option_type: str, *, on_date: date
@@ -111,7 +115,8 @@ class FyersInstrumentResolver:
         Raises :class:`InstrumentNotFoundError` if the master has no such contract.
         """
         self._ensure_index(on_date)
-        key = (underlying.upper(), option_type.upper(), int(strike))
+        name = self._match_underlying(underlying)
+        key = (name, option_type.upper(), int(strike))
         upcoming = [c for c in self._index.get(key, ()) if c.expiry >= on_date]
         if not upcoming:
             raise InstrumentNotFoundError(
@@ -130,6 +135,56 @@ class FyersInstrumentResolver:
         )
         return nearest
 
+    def lot_size_for(self, underlying: str, *, on_date: date) -> int | None:
+        """Return the exchange lot size for ``underlying``, or ``None`` if unknown.
+
+        Sourced from the same master the contracts come from, so a stock option
+        is sized by what the exchange actually says rather than by a hand-kept
+        list that only ever covered the index underlyings.
+        """
+        self._ensure_index(on_date)
+        try:
+            name = self._match_underlying(underlying)
+        except InstrumentNotFoundError:
+            return None
+        return self._lot_sizes.get(name)
+
+    def _match_underlying(self, underlying: str) -> str:
+        """Map a signal's underlying to the master's spelling of it.
+
+        Signals name instruments the way people speak — ``Apollo hospital``,
+        ``Bajaj finance``, ``L&T`` — while the master uses exchange tickers
+        (``APOLLOHOSP``, ``BAJFINANCE``, ``LT``). Three deterministic steps, in
+        order: spacing, case and punctuation are normalised away; a small alias
+        table covers the names no rule can bridge; then a ticker that abbreviates
+        the spoken name (one is a prefix of the other) is accepted **only when
+        exactly one** candidate matches.
+
+        An ambiguous name raises rather than guessing — ``SBI`` fits SBIN,
+        SBICARD and SBILIFE, and placing a real order on the wrong company is far
+        worse than reporting that the name was unclear.
+        """
+        query = _normalise_underlying(underlying)
+        if not query:
+            raise InstrumentNotFoundError("No underlying given")
+        query = _UNDERLYING_ALIASES.get(query, query)
+        known = self._lot_sizes.keys() | {u for (u, _, _) in self._index}
+        if query in known:
+            return query
+        candidates = sorted(
+            name for name in known if name.startswith(query) or query.startswith(name)
+        )
+        if len(candidates) == 1:
+            logger.info("Matched underlying %r -> %s", underlying, candidates[0])
+            return candidates[0]
+        if not candidates:
+            raise InstrumentNotFoundError(
+                f"Unknown underlying {underlying!r} (not in the FYERS master)"
+            )
+        raise InstrumentNotFoundError(
+            f"Ambiguous underlying {underlying!r}: matches {', '.join(candidates)}"
+        )
+
     def _ensure_index(self, on_date: date) -> None:
         """Build (or refresh) the contract index for ``on_date`` if needed."""
         if self._cached_on == on_date and self._index:
@@ -144,6 +199,11 @@ class FyersInstrumentResolver:
         for contracts in index.values():
             contracts.sort(key=lambda c: c.expiry)
         self._index = index
+        self._lot_sizes = {
+            underlying: contracts[0].lot_size
+            for (underlying, _, _), contracts in index.items()
+            if contracts and contracts[0].lot_size > 0
+        }
         self._cached_on = on_date
         logger.info(
             "Loaded %s FYERS option contracts (cached for %s).",
@@ -176,7 +236,7 @@ def _row_to_option(
         return None
     resolved = ResolvedInstrument(
         tradingsymbol=symbol,
-        exchange=str(row.get("exchange") or "NSE"),
+        exchange=_exchange_of(symbol, row.get("exchange")),
         expiry=expiry,
         lot_size=int(row.get("lot_size") or 0),
     )
@@ -252,3 +312,44 @@ def _http_get(url: str) -> str:
     with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310 - fixed https URL
         charset = response.headers.get_content_charset() or "utf-8"
         return response.read().decode(charset, errors="replace")
+
+
+#: Spoken names the prefix rule cannot bridge, because the ticker drops interior
+#: letters (``BAJAJ FINANCE`` -> ``BAJFINANCE``) or renames outright
+#: (``ULTRATECH`` -> ``ULTRACEMCO``), or because the short form is ambiguous on
+#: its own (``SBI`` also prefixes SBICARD/SBILIFE, but a trader saying "SBI"
+#: means the bank). Keyed by the normalised spoken name. Kept deliberately small
+#: and explicit: entries are added as real signals reveal the need — which is
+#: precisely what shadow mode's rejected/missed alerts surface.
+_UNDERLYING_ALIASES: dict[str, str] = {
+    "BAJAJFINANCE": "BAJFINANCE",
+    "BAJAJFIN": "BAJFINANCE",
+    "BAJAJFINSERV": "BAJAJFINSV",
+    "ULTRATECH": "ULTRACEMCO",
+    "ULTRATECHCEMENT": "ULTRACEMCO",
+    "LARSEN": "LT",
+    "LARSENTOUBRO": "LT",
+    "SBI": "SBIN",
+    "STATEBANK": "SBIN",
+    "MARUTISUZUKI": "MARUTI",
+}
+
+
+def _normalise_underlying(underlying: str) -> str:
+    """Upper-case an underlying and strip spacing/punctuation (``L&T`` -> ``LT``)."""
+    return "".join(ch for ch in underlying.upper() if ch.isalnum())
+
+
+def _exchange_of(symbol: str, raw: Any) -> str:
+    """Return the exchange for a contract, preferring the symbol's own prefix.
+
+    The FYERS master's exchange column holds a numeric code (``10``), which is
+    meaningless in a log line or an alert; the tradingsymbol already carries the
+    real exchange (``NSE:COFORGE26OCT1500CE``), so that wins. The raw value is
+    used only when it looks like an exchange name.
+    """
+    prefix, _, rest = symbol.partition(":")
+    if rest and prefix.isalpha():
+        return prefix.upper()
+    text = str(raw or "").strip()
+    return text.upper() if text.isalpha() else "NSE"

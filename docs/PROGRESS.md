@@ -17,6 +17,7 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | —     | Second channel (parse-only) + per-channel switches | ✅ Done (253 total) |
 | —     | FYERS broker + per-channel broker selection | ✅ Done (308 total) |
 | —     | Telegram bot notifications (signal + outcome) | ✅ Done (322 total) |
+| —     | Channel 2 shadow mode (FYERS payload, no order) + broker lot sizes | ✅ Done (403 total) |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
 > The trade engine is the broker-agnostic decision layer (it *decides*, it does
@@ -762,15 +763,117 @@ in dry-run** — both covered.
   not-traded, best-effort swallow of send failures, enabled/disabled/unconfigured
   factory). Suite **322 passing** (`uv run pytest`).
 
+## Channel 2 shadow mode — the live FYERS path, no order (completed 2026-09-27)
+
+**Why:** channel 2 (`-1001524695283`, SafeTraders premium) gives better and more
+consistent signals than channel 1, so it is the channel to actually trade — and
+the user has a full-time job, so it has to run unattended. Before real money, the
+ask was to see, for every signal, the **actual broker-ready payload**, to know the
+trade *would* have gone through. `dry_run` cannot answer that: it never contacts a
+broker, so it proves the order's shape and nothing about whether FYERS would
+accept the symbol, expiry, lot size or cost.
+
+**Decisions (2026-09-27):** full broker check but no order; full payload pushed to
+the Telegram bot; alert only on *signal-like* parse misses (not all chatter).
+
+- **`execution/shadow.py` — `FyersShadowExecutor` (mode `fyers_shadow`)**
+  Subclasses `FyersExecutor`, so it is the live path minus the last call: same
+  validation, same `_resolve`, same `_to_fyers_params`. `FyersExecutor.execute`
+  was refactored to extract **`_prepare()`** (validate → resolve → build params),
+  which both share — so what shadow reports is the *real* payload, not a
+  reconstruction. It then runs a **funds check** (option buying costs the full
+  premium: `entry x qty`, compared against the FYERS `funds()` available balance)
+  and stops. `SUCCESS` = would go through; `REJECTED` = would not (bad symbol,
+  failed validation, or insufficient funds). An unreadable balance reports
+  **unknown**, never a silent pass.
+  Tests assert the guarantee directly: the injected client **raises** on
+  `place_order`/`modify_order`/`cancel_order`, so any regression that submits
+  fails the suite.
+- **`ShadowReport`** (`models.py`) — resolved symbol, exchange, expiry, lot size,
+  lots, quantity, the payload dict, and the funds verdict; attached to
+  `ExecutionResult.shadow` (trailing optional field, `None` for every other
+  executor). The `executions` table stores the *verdict*, not the raw request, so
+  the contract/expiry/qty travel in `remarks` (persisted); the full payload goes
+  to the log line.
+- **`BrokerLotSizeProvider`** (`lot_size.py`) — **on the critical path, not
+  polish**: ch2 trades stock options and `LOT_SIZES` only listed NIFTY/BANKNIFTY,
+  so every ch2 signal would have been rejected as unsized. Reads lot sizes from
+  the same FYERS master that resolves the symbol (exposed via the new
+  `FyersExecutor.lot_size_source`), falling back to `ConfigLotSizeProvider` when
+  the master is unreachable. A network failure logs and falls back rather than
+  taking sizing down.
+- **Underlying matching** (`fyers_instruments.py`) — signals say `Apollo
+  hospital`, the master says `APOLLOHOSP`. Three deterministic steps: normalise
+  case/spacing/punctuation (`L&T` → `LT`), apply a small **alias table** for names
+  no rule can bridge (`BAJAJ FINANCE` → `BAJFINANCE`, `ULTRATECH` → `ULTRACEMCO`,
+  `SBI` → `SBIN`), then accept a ticker that abbreviates the spoken name (one a
+  prefix of the other) **only when exactly one** candidate matches. An ambiguous
+  name (`Apollo` → APOLLOHOSP + APOLLOTYRE) **raises** rather than guessing —
+  buying the wrong company is far worse than reporting an unclear name. Also adds
+  `lot_size_for(underlying, *, on_date)`.
+  **Verified against the live master** (81,174 contracts, 216 underlyings) on
+  2026-09-27: 19 of 20 real-world stock names resolve, the exception being
+  `Tata motors`, which has **no F&O contract listed** (the master carries
+  TATACONSUM/TATAELXSI/TATAPOWER/TATASTEEL only) — a correct miss, not a gap.
+  The alias table is expected to grow as shadow alerts reveal new names.
+- **Exchange from the symbol** — the master's exchange column is a numeric code
+  (`10`); the tradingsymbol already carries the real one (`NSE:...`), so that is
+  used instead and alerts no longer read "(10)".
+- **`Channel2Pipeline` is no longer parse-only** — now *parse → store → evaluate →
+  shadow-execute*, with the engine's real gates (market hours, dedupe, daily cap)
+  applying, so a shadow report reflects what would really have happened. New
+  `PipelineStatus.SHADOWED` is reported **only** when the executor actually
+  withheld the order (a live broker reports `EXECUTED`), so the status can never
+  overstate or understate what happened to the money. The trade state machine and
+  management commands are deliberately still absent: with no order placed there is
+  nothing to manage. Passing no engine/executor keeps the old parse-only shape.
+- **Missed-signal detection** — `looks_like_signal()` (`channel2.py`) flags a
+  message carrying an option contract or an `Sl`/`Target` label that the parser
+  rejected; narration (`target done`, `sl hit`, `type mistake`, `cmp <n>`) is
+  excluded. Surfaces as `PipelineStatus.MISSED` → a console line and a
+  "POSSIBLE SIGNAL NOT PARSED" Telegram alert **quoting the raw text**. Loose
+  heuristic on purpose: a false alert costs a glance, a missed signal costs a trade.
+- **Alerts** (`notifier.py`) — `_format_shadow` renders symbol, exchange, expiry,
+  side/type, `qty (lots x lot size)`, entry/SL/target, cost vs. available funds,
+  and the verdict; the missed alert quotes the original message (trimmed).
+- **Safety rail** (`main.py`) — channel 2 accepts only `dry_run` / `fyers_shadow`;
+  any live broker exits at startup with an explanation, because ch2 has no trade
+  manager and would place entries with **no protective stop-loss or target**.
+- **Config** — `fyers_shadow` added to `_EXECUTION_MODES`; credential validation
+  now keys off `_FYERS_MODES` so shadow mode requires the same `FYERS_*` values
+  and daily token as live.
+- Tests: `test_shadow_executor.py` (22), `test_lot_size.py` (11), plus additions to
+  `test_channel2.py`, `test_channel2_pipeline.py`, `test_fyers_instruments.py`,
+  `test_notifier.py`, `test_executor.py`. Suite **403 passing** (`uv run pytest`).
+
+**Still open before ch2 goes live (`fyers`):** the trade manager must cover ch2
+(protective SL-M + target with OCO, fill polling) — without it a live entry is
+unprotected; **trade-level source isolation** (tag `trades` with their channel so
+management commands act only on same-channel positions); a **ch2 command parser**
+(`Type mistake` → cancel); and a decision on **scale-out vs first-target-only**.
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
-- No git remote configured yet. Commits so far (newest first):
-  - `00e6b0d` Add compact Signal string formatting
-  - `bb62074` Phase 2 - Signal parser
-  - `be2856e` Support numeric channel IDs and add dialog-listing helper
-  - `b54c827` Phase 1 - Telegram listener
-- Working tree clean.
+- Remote: `origin` → `git@github.com:axaxdhu/TeleTrader.git`. Branch `master`
+  tracks `origin/master` and is in sync; working tree clean.
+- Commits (newest first, as of 2026-09-27):
+  - `b3a4458` Add Telegram bot notifications for recognised signals + outcomes
+  - `e8bc219` Add FYERS live broker + per-channel broker selection
+  - `65a8a63` Add second signal channel (parse-only) and trade-management commands
+  - `9d9752e` Add live Zerodha Kite execution (Phase 5)
+  - `528f29e` Update docs for the execution layer, dedupe, and pipeline wiring
+  - `f62c2fa` Wire the pipeline end-to-end (parse -> store -> evaluate -> execute)
+  - `c7b7801` Add broker-independent order execution layer (DryRunExecutor)
+  - `64497a4` Make signal deduplication per trading day
+  - `7d999cf` Size trades in lots via a LotSizeProvider seam
+  - `63a708c` Add broker-agnostic trade engine (decision layer)
+  - `687c464` Always offset target 2 points below, tolerate ++
+  - `1703226` Phase 3 - SQLite persistence + open-ended target offset
+  - `3681c08` Add compact Signal string formatting
+  - `7b69803` Phase 2 - Signal parser
+  - `1bd57f7` Support numeric channel IDs and add dialog-listing helper
+  - `1dd4661` Phase 1 - Telegram listener
 
 ## Channel configuration
 
@@ -782,9 +885,11 @@ in dry-run** — both covered.
   and `me` stay strings.
 - **`list_dialogs.py`** (untracked throwaway) lists all your groups/channels with
   their ids: `uv run python list_dialogs.py`. Copy the id/username into `.env`.
-- Current `.env` value: `TELEGRAM_CHANNEL=me` (testing). Real signal channels the
-  account is in include e.g. `@safetrader90` / `-1001387252520`, `@BULLCHIP`,
-  `-1001163029526` (BULL CHIP PAID). Swap in the desired one for live use.
+- Current `.env` values (real channels, not `me`):
+  - `TELEGRAM_CHANNEL=-1001163029526` (BULL CHIP PAID) — channel 1, full pipeline.
+  - `TELEGRAM_CHANNEL_2=-1001524695283` (SafeTraders premium) — channel 2, parse-only.
+  - `CHANNEL_1_ENABLED` / `CHANNEL_2_ENABLED` are unset, so both default to `true`.
+  - Other channels the account is in: `@safetrader90` / `-1001387252520`, `@BULLCHIP`.
 
 ## Setup choices
 
@@ -795,39 +900,62 @@ in dry-run** — both covered.
 - Dependencies live in `pyproject.toml`; `uv.lock` is committed. No `requirements.txt`.
 - **src layout**: `src/teletrader/` (`config.py`, `logging_config.py`, `telegram_listener.py`), entry point `main.py`.
 - Config via env vars in `.env` (gitignored). Telegram API creds from <https://my.telegram.org>.
-- `TELEGRAM_CHANNEL=me` (Saved Messages) is the current value, used for testing — swap to the real signal channel later.
+- `TELEGRAM_CHANNEL` now points at a real channel (see Channel configuration above); `me` (Saved Messages) remains the easiest value for local testing.
 - `teletrader.session` (Telethon login session) exists and is gitignored, so runs no longer prompt for a login code.
 
 ## How to resume in a new chat
 
 1. Point me at this file: "read docs/PROGRESS.md" (it is NOT auto-loaded).
 2. `uv sync` if the venv is missing, then `uv run python main.py` to run.
-3. `uv run pytest` to confirm the 229 tests pass.
-4. Outstanding housekeeping: optionally set a real `TELEGRAM_CHANNEL` (currently
-   `me`); no git remote configured yet.
+3. `uv run pytest` to confirm the 322 tests pass.
+4. Outstanding housekeeping: brokers need a fresh access token each day
+   (`kite_login.py` / `fyers_login.py`; use the `--manual` paste flow on the
+   cloud VM), and FYERS live orders require a whitelisted static IP.
 
 ## Next
 
-All phases (1–5) are complete and **wired end-to-end**. A live signal runs
-parse→evaluate→store→execute, and the executor is selected by `EXECUTION_MODE`:
-`dry_run` (validate + log, sends nothing) or `kite` (live Zerodha order).
+*(reviewed 2026-09-27; suite 403 passing)*
 
-**To trade live:** set `EXECUTION_MODE=kite` and supply `KITE_API_KEY`,
-`KITE_API_SECRET`, `KITE_ACCESS_TOKEN` (generate the daily access token yourself —
-the app does not log in). Also `AUTO_TRADING=true`, inside market hours. The
-engine gates everything before the executor, so off-hours / auto-trading-off →
-`NOT_TRADED` and nothing reaches Kite.
+All phases (1–5) are complete and **wired end-to-end**, plus trade-management
+commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.
+A live signal runs parse→store→evaluate→execute. The broker is chosen
+**per channel** — `CHANNEL_1_BROKER` / `CHANNEL_2_BROKER`, falling back to the
+global `EXECUTION_MODE` — from three interchangeable executors: `dry_run`
+(validate + log, sends nothing), `kite` (live Zerodha) and `fyers` (live FYERS).
 
-Live orders now resolve to the exact Kite tradingsymbol (nearest weekly) via
-`KiteInstrumentResolver` — no manual symbol mapping needed.
+**Current `.env` posture:** channel 1 = `-1001163029526` (BULL CHIP PAID, full
+pipeline), channel 2 = `-1001524695283` (SafeTraders premium — now shadow-capable, set
+`CHANNEL_2_BROKER=fyers_shadow` to arm it),
+`EXECUTION_MODE=dry_run` with no per-channel override (so **nothing reaches a
+real broker**), `AUTO_TRADING=true`, `MAX_TRADES_PER_DAY=3`, `TRADE_LOTS=1`,
+`LOT_SIZES=NIFTY:65,BANKNIFTY:30`, hours 09:15–15:30 Asia/Kolkata,
+`NOTIFY_ENABLED` unset (alerts off).
+
+**To trade live:** set the channel's broker (`CHANNEL_1_BROKER=kite` or `fyers`,
+or the global `EXECUTION_MODE`) and supply that broker's credentials —
+`KITE_API_KEY` / `KITE_API_SECRET` / `KITE_ACCESS_TOKEN`, or `FYERS_APP_ID` /
+`FYERS_SECRET_ID` / `FYERS_ACCESS_TOKEN`. Access tokens are **daily and manual**:
+run `kite_login.py` / `fyers_login.py` (use `--manual` to paste the redirect URL
+on the cloud VM). FYERS live orders additionally need a whitelisted static IP.
+Also `AUTO_TRADING=true`, inside market hours. The engine gates everything before
+the executor, so off-hours / auto-trading-off → `NOT_TRADED` and nothing reaches
+the broker.
+
+Live orders resolve to the exact broker symbol (nearest weekly expiry) via
+`KiteInstrumentResolver` / `FyersInstrumentResolver` — no manual symbol mapping.
 
 **Known follow-up (not started):**
-- **Trade-management Phase 2 (live Kite): ✅ done** — see the "Phase 2: live Kite"
-  notes above (SL-M + target LIMIT protection, bounded fill poll, app-managed OCO,
-  live cancel/modify). Remaining polish is listed there (reconcile cadence/postbacks,
-  pending→open upgrade, EOD square-off, fill-poll config, real `MODIFY_TARGET`
-  wording).
-- **`BrokerLotSizeProvider`** — source lot sizes from the broker instrument master
-  instead of `.env`, behind the existing `LotSizeProvider` seam.
-  `KiteInstrumentResolver` already surfaces `lot_size`, so this is mostly wiring
-  (and sharing the cached instrument dump) — no engine change.
+- **Channel 2 to live FYERS** — see the shadow-mode section above for the four
+  things that must land first (trade manager for ch2, trade-level source
+  isolation, ch2 command parser, scale-out decision).
+- **`BrokerLotSizeProvider` for channel 1 / Kite** — ✅ done for FYERS/channel 2;
+  channel 1 still sizes from `LOT_SIZES`. `KiteInstrumentResolver` surfaces
+  `lot_size`, so it is the same wiring.
+- **Trade-management polish** (Phase 2 live Kite itself is ✅ done — SL-M + target
+  LIMIT protection, bounded fill poll, app-managed OCO, live cancel/modify). Open
+  items from those notes: reconcile cadence / postbacks instead of polling,
+  `PENDING_ENTRY → OPEN` upgrade for late fills (they currently never receive
+  protective orders), EOD square-off, configurable fill-poll window, real
+  `MODIFY_TARGET` wording.
+- **Pre-market connection timeout** seen on 2026-07-01 — unresolved; traceback not
+  yet captured.

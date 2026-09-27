@@ -172,6 +172,11 @@ class TelegramListener:
             print(f"{stamp} (duplicate) {result.signal}")
             return
 
+        if result.status is PipelineStatus.MISSED:
+            print(f"{stamp} ⚠️  POSSIBLE SIGNAL NOT PARSED — nothing traded")
+            print(f"           {text!r}")
+            return
+
         # Stored: show the signal id + the signal, then the outcome.
         print(f"{stamp} SIGNAL #{result.stored_id} {result.signal}")
         if result.status is PipelineStatus.STORED:
@@ -182,6 +187,13 @@ class TelegramListener:
             print(f"           → not traded: {result.decision.reason}")
             return
 
-        assert result.execution is not None  # EXECUTED
+        assert result.execution is not None  # EXECUTED / SHADOWED
         execution = result.execution
         print(f"           → {execution.status.value}: {execution.remarks}")
+        report = execution.shadow
+        if report is not None:
+            print(
+                f"           → [SHADOW] {report.tradingsymbol} exp "
+                f"{report.expiry.isoformat()} qty {report.quantity} "
+                f"({report.lots}x{report.lot_size}) · {report.funds_note}"
+            )

@@ -261,6 +261,42 @@ def test_factory_builds_fyers_executor(repo: ExecutionRepository) -> None:
     assert ex.mode == "fyers"
 
 
+def test_factory_builds_fyers_shadow_executor(repo: ExecutionRepository) -> None:
+    from teletrader.execution import FyersExecutor, FyersShadowExecutor
+
+    ex = create_executor(
+        _config(
+            execution_mode="fyers_shadow",
+            fyers_app_id="APP-100",
+            fyers_secret_id="s",
+            fyers_access_token="t",
+        ),
+        repo,
+    )
+    # It is the live executor's machinery, but selecting it must never produce
+    # the live executor itself.
+    assert isinstance(ex, FyersShadowExecutor)
+    assert isinstance(ex, FyersExecutor)
+    assert ex.mode == "fyers_shadow"
+
+
+def test_shadow_mode_requires_fyers_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Shadow mode places no order but still calls FYERS (symbol master, funds),
+    # so a missing daily token must fail at startup rather than mid-session.
+    for var, value in (
+        ("TELEGRAM_API_ID", "1"),
+        ("TELEGRAM_API_HASH", "h"),
+        ("TELEGRAM_PHONE", "+1"),
+        ("TELEGRAM_CHANNEL", "me"),
+        ("CHANNEL_2_BROKER", "fyers_shadow"),
+    ):
+        monkeypatch.setenv(var, value)
+    with pytest.raises(ConfigError):
+        Config.from_env()
+
+
 def test_factory_mode_override_selects_per_channel_broker(repo: ExecutionRepository) -> None:
     from teletrader.execution import DryRunExecutor, KiteExecutor
 

@@ -128,6 +128,17 @@ def format_alert(
     if status is PipelineStatus.DUPLICATE:
         return f"🔁 {tag} Duplicate signal (already seen today)\n{signal}"
 
+    if status is PipelineStatus.MISSED:
+        # The point of this alert is the text itself: the user reads it, sees what
+        # the parser choked on, and the format gap gets fixed.
+        return (
+            f"⚠️ {tag} POSSIBLE SIGNAL NOT PARSED — check the format\n"
+            f"Nothing was traded. Original message:\n{_quote(result.raw_text)}"
+        )
+
+    if status is PipelineStatus.SHADOWED:
+        return _format_shadow(result, tag=tag, broker=broker)
+
     if status is PipelineStatus.STORED:  # parse-only channel
         return f"🗒 {tag} Signal stored (parse-only, not traded)\n{signal}"
 
@@ -151,6 +162,69 @@ def format_alert(
 
     # Any other (future) status: fall back to a generic line rather than silence.
     return f"ℹ️ {tag} {status.value}\n{signal or ''}".strip()
+
+
+def _format_shadow(result: PipelineResult, *, tag: str, broker: str) -> str:
+    """Render the broker-ready order that shadow mode built and withheld.
+
+    This is the alert the whole ramp-up rests on, so it shows the details that
+    decide whether a real order would have been accepted — the resolved contract,
+    the expiry, the exchange lot size and the quantity that follows from it, the
+    prices, and the funds check — rather than a reassuring summary.
+    """
+    execution = result.execution
+    signal = result.signal
+    if execution is None or execution.shadow is None:  # defensive
+        return f"👁 {tag} Shadow run\n{signal}"
+
+    report = execution.shadow
+    order = execution.order
+    verdict = (
+        "✅ WOULD GO THROUGH"
+        if execution.status is ExecutionStatus.SUCCESS
+        else f"❌ WOULD BE {execution.status.value}"
+    )
+    lines = [
+        f"👁 {tag} SHADOW — no order sent",
+        f"{signal}",
+        "",
+        f"{verdict}",
+        f"Symbol: {report.tradingsymbol} ({report.exchange})",
+        f"Expiry: {report.expiry.isoformat()}",
+        f"Side: {order.transaction_type.value} · {order.order_type.value}",
+        f"Qty: {report.quantity} ({report.lots} lot x {report.lot_size})",
+        f"Entry: {_price(order.entry_price)} · "
+        f"SL: {_price(order.stop_loss)} · Target: {_price(order.target)}",
+    ]
+    if report.funds_required is not None:
+        available = (
+            _price(report.funds_available)
+            if report.funds_available is not None
+            else "unknown"
+        )
+        lines.append(
+            f"Cost: {_price(report.funds_required)} · Available: {available}"
+        )
+    lines.append(f"Funds: {report.funds_note}")
+    lines.append(f"Broker: {broker}")
+    return "\n".join(lines)
+
+
+def _price(value: float | None) -> str:
+    """Render a price for an alert: ``-`` when absent, no trailing ``.0``."""
+    if value is None:
+        return "-"
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def _quote(text: str | None, *, limit: int = 400) -> str:
+    """Quote a raw message for an alert, trimmed to a sensible length."""
+    if not text or not text.strip():
+        return "(empty)"
+    snippet = text.strip()
+    if len(snippet) > limit:
+        snippet = snippet[:limit] + "…"
+    return snippet
 
 
 #: Icons for management-command outcomes.

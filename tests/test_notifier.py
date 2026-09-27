@@ -181,3 +181,130 @@ def test_create_notifier_enabled_and_configured() -> None:
 
 def test_null_notifier_is_a_noop() -> None:
     NullNotifier().notify("anything")  # must not raise
+
+
+# --- Shadow + missed alerts ---------------------------------------------------
+#
+# During the ramp-up these two alerts are the entire feedback loop: the user is
+# at work and sees only what the bot sends. So the shadow alert has to carry
+# enough to judge a would-be order, and a parse miss must never look like
+# silence.
+
+from datetime import date as _date  # noqa: E402
+
+from teletrader.execution import ShadowReport  # noqa: E402
+
+
+def _shadow_report(**overrides: object) -> ShadowReport:
+    params: dict[str, object] = {
+        "tradingsymbol": "NSE:COFORGE26OCT1500CE",
+        "exchange": "NSE",
+        "expiry": _date(2026, 10, 29),
+        "lot_size": 150,
+        "lots": 1,
+        "quantity": 150,
+        "payload": {"symbol": "NSE:COFORGE26OCT1500CE", "qty": 150},
+        "funds_required": 10_500.0,
+        "funds_available": 50_000.0,
+        "funds_ok": True,
+        "funds_note": "Sufficient funds.",
+    }
+    params.update(overrides)
+    return ShadowReport(**params)  # type: ignore[arg-type]
+
+
+def _shadow_result(
+    status: ExecutionStatus = ExecutionStatus.SUCCESS, **overrides: object
+) -> PipelineResult:
+    return PipelineResult(
+        PipelineStatus.SHADOWED,
+        signal=SIGNAL,
+        stored_id=11,
+        decision=TradeDecision(execute=True, quantity=150, reason="Signal accepted"),
+        execution=ExecutionResult(
+            status=status,
+            order=_order(),
+            remarks="[SHADOW] Would submit to FYERS.",
+            shadow=_shadow_report(**overrides),
+        ),
+    )
+
+
+def _alert(result: PipelineResult, broker: str = "fyers_shadow") -> str:
+    text = format_alert(result, channel_name="channel2", broker=broker)
+    assert text is not None
+    return text
+
+
+def test_shadow_alert_carries_the_contract_and_sizing() -> None:
+    text = _alert(_shadow_result())
+
+    assert "NSE:COFORGE26OCT1500CE" in text
+    assert "2026-10-29" in text          # expiry
+    assert "150 (1 lot x 150)" in text   # quantity and how it was derived
+
+
+def test_shadow_alert_says_no_order_was_sent() -> None:
+    text = _alert(_shadow_result())
+
+    # The user must never mistake a shadow alert for a real fill.
+    assert "SHADOW" in text
+    assert "no order sent" in text.lower()
+
+
+def test_shadow_alert_shows_the_verdict_and_funds() -> None:
+    text = _alert(_shadow_result())
+
+    assert "WOULD GO THROUGH" in text
+    assert "10500" in text or "10,500" in text  # cost
+    assert "Sufficient funds." in text
+
+
+def test_shadow_alert_reports_a_failing_verdict() -> None:
+    text = _alert(
+        _shadow_result(
+            ExecutionStatus.REJECTED,
+            funds_ok=False,
+            funds_available=1_000.0,
+            funds_note="insufficient funds - needs 10500.00, available 1000.00",
+        )
+    )
+
+    assert "WOULD BE REJECTED" in text
+    assert "insufficient funds" in text
+
+
+def test_shadow_alert_reports_an_unknown_balance_honestly() -> None:
+    text = _alert(
+        _shadow_result(
+            funds_ok=None,
+            funds_available=None,
+            funds_note="Funds check unavailable (balance not read).",
+        )
+    )
+
+    assert "unknown" in text
+    assert "unavailable" in text
+
+
+def test_missed_alert_quotes_the_original_message() -> None:
+    raw = "Coforge 1500 ce above 70\nsl-- sixty six"
+    text = _alert(PipelineResult(PipelineStatus.MISSED, raw_text=raw))
+
+    # The raw text is the point: it is what tells the user what to fix.
+    assert "NOT PARSED" in text
+    assert "sl-- sixty six" in text
+    assert "Nothing was traded" in text
+
+
+def test_missed_alert_trims_a_very_long_message() -> None:
+    text = _alert(PipelineResult(PipelineStatus.MISSED, raw_text="x" * 900))
+
+    assert "…" in text
+    assert len(text) < 600
+
+
+def test_missed_alert_survives_an_empty_message() -> None:
+    text = _alert(PipelineResult(PipelineStatus.MISSED, raw_text=None))
+
+    assert "(empty)" in text

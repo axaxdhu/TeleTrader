@@ -1,7 +1,8 @@
 """Executor selection from configuration.
 
 The composition root asks for *an* :class:`Executor` for a given broker mode and
-gets the matching implementation — ``dry_run``, ``kite``, or ``fyers``. Putting
+gets the matching implementation — ``dry_run``, ``kite``, ``fyers``, or
+``fyers_shadow``. Putting
 the choice here (not in the engine or the listener) means switching a channel's
 broker is a one-line config change and nothing upstream knows the difference.
 
@@ -25,8 +26,16 @@ from .fyers import FyersExecutor
 from .kite import MODE as KITE_MODE
 from .kite import KiteExecutor
 from .repository import ExecutionRepository
+from .shadow import MODE as FYERS_SHADOW_MODE
+from .shadow import FyersShadowExecutor
 
-__all__ = ["FYERS_MODE", "KITE_MODE", "create_executor"]
+__all__ = [
+    "DRY_RUN_MODE",
+    "FYERS_MODE",
+    "FYERS_SHADOW_MODE",
+    "KITE_MODE",
+    "create_executor",
+]
 
 
 def create_executor(
@@ -54,8 +63,13 @@ def create_executor(
             tz=ZoneInfo(config.market_timezone),
             clock=clock,
         )
-    if resolved == FYERS_MODE:
-        return FyersExecutor(
+    if resolved in (FYERS_MODE, FYERS_SHADOW_MODE):
+        # Shadow mode is the live executor minus the final submit, so it is built
+        # from exactly the same credentials and symbol master.
+        executor_class = (
+            FyersExecutor if resolved == FYERS_MODE else FyersShadowExecutor
+        )
+        return executor_class(
             repository,
             app_id=config.fyers_app_id,
             access_token=config.fyers_access_token,
