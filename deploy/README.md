@@ -28,6 +28,19 @@ uv run python eod_report.py --print
 uv run python eod_report.py --date 2026-09-28 --print
 ```
 
+## A note on the timer's timezone
+
+The server runs UTC, so the schedule carries its timezone **inline on
+`OnCalendar`** (`Mon..Fri 15:35 Asia/Kolkata`). There is no `Timezone=` key for
+timers, and systemd ignores unknown keys with only a log line — an earlier
+version of this file used one and was silently scheduled for 15:35 **UTC**,
+i.e. 21:05 IST. Always confirm after changing it:
+
+```bash
+systemd-analyze calendar "Mon..Fri 15:35 Asia/Kolkata"   # -> 10:05 UTC
+systemctl list-timers teletrader-eod.timer
+```
+
 ## A note on restarts
 
 `teletrader.service` sets `StartLimitBurst=5` / `StartLimitIntervalSec=300`. A

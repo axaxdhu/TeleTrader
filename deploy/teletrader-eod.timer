@@ -2,12 +2,13 @@
 Description=Run the TeleTrader end-of-day summary after the close
 
 [Timer]
-# 15:35 IST, five minutes after the 15:30 close, on weekdays only.
-# The server runs UTC; OnCalendar is given in IST explicitly so the schedule
-# does not silently shift if the host timezone ever changes.
-OnCalendar=Mon..Fri 15:35
-Timezone=Asia/Kolkata
-# If the box was asleep or down at 15:35, still send the summary on the next boot.
+# 15:35 IST on weekdays, five minutes after the 15:30 close. The timezone is
+# given inline on OnCalendar (systemd >= 252): there is no `Timezone=` key, and
+# systemd silently ignores unknown keys — so writing one would have scheduled
+# this at 15:35 UTC, i.e. 21:05 IST, hours after the market shut.
+# Verify with: systemd-analyze calendar "Mon..Fri 15:35 Asia/Kolkata"
+OnCalendar=Mon..Fri 15:35 Asia/Kolkata
+# If the box was down at 15:35, still send the summary once it is back.
 Persistent=true
 
 [Install]
