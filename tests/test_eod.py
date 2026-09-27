@@ -274,7 +274,7 @@ def test_summary_shows_each_trade_and_the_total(repository: ShadowRepository) ->
     assert "COFORGE" in text
     assert "+300" in text
     assert "target" in text
-    assert "Gross:" in text
+    assert "TOTAL:" in text
 
 
 def test_summary_always_states_its_assumptions(repository: ShadowRepository) -> None:
@@ -347,3 +347,86 @@ def test_a_history_error_raises_so_the_trade_is_unscored() -> None:
 
     with pytest.raises(RuntimeError, match="FYERS history failed"):
         FyersCandleSource(client).candles("NSE:X", DAY)
+
+
+# --- Index vs stock split -----------------------------------------------------
+#
+# A back-test over the channel's real history showed index and stock signals
+# behaving like two different strategies posted under one name (92% vs 26% win
+# rates). A single combined figure hides which of them is working, so the report
+# totals them separately.
+
+
+@pytest.mark.parametrize(
+    "underlying",
+    ["NIFTY", "Nifty", "BANKNIFTY", "Bank Nifty", "FINNIFTY", "MIDCPNIFTY"],
+)
+def test_index_underlyings_are_recognised(underlying: str) -> None:
+    from teletrader.eod import is_index
+
+    assert is_index(underlying) is True
+
+
+@pytest.mark.parametrize("underlying", ["COFORGE", "OIL INDIA", "TMPV", "", None])
+def test_stocks_are_not_treated_as_indices(underlying: str | None) -> None:
+    from teletrader.eod import is_index
+
+    assert is_index(underlying) is False
+
+
+def _mixed_day(repository: ShadowRepository) -> FakeCandles:
+    _store(repository, tradingsymbol="NSE:NIFTY26OCT23300PE", underlying="NIFTY",
+           quantity=65, lot_size=65, entry_price=131.0, stop_loss=120.0, target=142.0)
+    _store(repository)  # COFORGE, a stock
+    return FakeCandles(
+        {
+            "NSE:NIFTY26OCT23300PE": [_candle(1, 130, 143)],          # target: +715
+            "NSE:COFORGE26OCT1500CE": [_candle(1, 65, 71)],           # stopped: -400
+        }
+    )
+
+
+def test_report_groups_trades_by_instrument_type(
+    repository: ShadowRepository,
+) -> None:
+    candles = _mixed_day(repository)
+    report = score_day(repository, candles, day=DAY)
+
+    assert [t.run.run.underlying for t in report.index_trades] == ["NIFTY"]
+    assert [t.run.run.underlying for t in report.stock_trades] == ["COFORGE"]
+
+
+def test_summary_totals_index_and_stocks_separately(
+    repository: ShadowRepository,
+) -> None:
+    text = format_report(score_day(repository, _mixed_day(repository), day=DAY))
+
+    assert "── INDEX ──" in text
+    assert "── STOCKS ──" in text
+    # Each section carries its own P&L, so a profitable index book is not
+    # masked by a losing stock book (or the reverse).
+    assert "Index: +715" in text
+    assert "Stocks: -400" in text
+    assert "TOTAL: +315" in text
+
+
+def test_a_section_with_no_trades_is_omitted(repository: ShadowRepository) -> None:
+    _store(repository, tradingsymbol="NSE:NIFTY26OCT23300PE", underlying="NIFTY",
+           quantity=65, lot_size=65, entry_price=131.0, stop_loss=120.0, target=142.0)
+    text = format_report(
+        score_day(
+            repository,
+            FakeCandles({"NSE:NIFTY26OCT23300PE": [_candle(1, 130, 143)]}),
+            day=DAY,
+        )
+    )
+
+    assert "── INDEX ──" in text
+    assert "STOCKS" not in text
+
+
+def test_section_subtotals_report_win_counts(repository: ShadowRepository) -> None:
+    text = format_report(score_day(repository, _mixed_day(repository), day=DAY))
+
+    assert "1/1 won" in text  # the index section
+    assert "0/1 won" in text  # the stock section

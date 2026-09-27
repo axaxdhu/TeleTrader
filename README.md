@@ -72,6 +72,10 @@ would have been worth. A systemd timer (`deploy/teletrader-eod.timer`) fires it
 at 15:35 IST on weekdays; `--print` renders it without sending and `--date`
 re-scores an earlier day.
 
+Index and stock options are totalled **separately** — on a channel that posts
+both they can behave like two different strategies, and one combined figure
+hides which is working.
+
 Where the data is ambiguous it is read pessimistically: a bar spanning both the
 stop and the target counts as **stopped**, since a minute candle records a range
 rather than the order its extremes occurred in. The figure assumes the entry

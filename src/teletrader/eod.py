@@ -33,6 +33,7 @@ from .logging_config import get_logger
 from .shadow_repository import Outcome, ShadowRepository, StoredShadowRun
 
 __all__ = [
+    "INDEX_UNDERLYINGS",
     "Candle",
     "CandleSource",
     "DailyReport",
@@ -40,9 +41,30 @@ __all__ = [
     "ScoredTrade",
     "build_report",
     "format_report",
+    "is_index",
     "score_day",
     "score_run",
 ]
+
+#: The NSE F&O index underlyings. Everything else is a stock option. Kept as an
+#: explicit list rather than inferred, because the distinction decides how the
+#: day is reported and a silent misclassification would put a trade in the wrong
+#: column — the very comparison the split exists to make.
+INDEX_UNDERLYINGS = frozenset(
+    {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "SENSEX", "BANKEX"}
+)
+
+
+def is_index(underlying: str | None) -> bool:
+    """Whether ``underlying`` is an index rather than a single stock.
+
+    Case and spacing are normalised away, so ``Bank Nifty`` and ``BANKNIFTY``
+    are the same instrument.
+    """
+    if not underlying:
+        return False
+    return "".join(ch for ch in underlying.upper() if ch.isalnum()) in INDEX_UNDERLYINGS
+
 
 logger = get_logger(__name__)
 
@@ -103,6 +125,25 @@ class DailyReport:
 
     def count(self, outcome: Outcome) -> int:
         return sum(1 for t in self.trades if t.outcome is outcome)
+
+    @property
+    def index_trades(self) -> tuple[ScoredTrade, ...]:
+        """Trades on index options."""
+        return tuple(t for t in self.trades if is_index(t.run.run.underlying))
+
+    @property
+    def stock_trades(self) -> tuple[ScoredTrade, ...]:
+        """Trades on single-stock options."""
+        return tuple(t for t in self.trades if not is_index(t.run.run.underlying))
+
+
+def subtotal(trades: Sequence[ScoredTrade]) -> tuple[int, float, float]:
+    """Return ``(wins, pnl, deployed)`` for the scored trades in ``trades``."""
+    scored = [t for t in trades if t.pnl is not None]
+    wins = sum(1 for t in scored if (t.pnl or 0) > 0)
+    pnl = sum(t.pnl or 0.0 for t in scored)
+    deployed = sum((t.run.run.entry_price or 0.0) * t.run.run.quantity for t in scored)
+    return wins, pnl, deployed
 
 
 def score_run(run: StoredShadowRun, candles: Sequence[Candle]) -> ScoredTrade:
@@ -178,10 +219,14 @@ def score_day(
 
 
 def format_report(report: DailyReport) -> str:
-    """Render the day's report as the Telegram summary."""
-    lines = [
-        f"📊 {report.source} — {report.day.strftime('%d %b %Y')} (shadow)",
-    ]
+    """Render the day's report as the Telegram summary.
+
+    Index and stock options are totalled **separately**. They behave like two
+    different strategies posted under one name, and a single combined figure
+    hides which of them is actually working — the one thing the reader most
+    needs to know.
+    """
+    lines = [f"📊 {report.source} — {report.day.strftime('%d %b %Y')} (shadow)"]
     if not report.trades:
         lines.append("No signals today.")
         return "\n".join(lines)
@@ -190,26 +235,29 @@ def format_report(report: DailyReport) -> str:
         f"{len(report.trades)} signal(s) · {report.count(Outcome.TARGET)} target · "
         f"{report.count(Outcome.STOPPED)} stopped · {report.count(Outcome.OPEN)} open"
     )
-    lines.append("")
 
-    for trade in report.trades:
-        detail = trade.run.run
-        name = detail.underlying or detail.tradingsymbol
-        if trade.pnl is None:
-            lines.append(f"  ? {name} — not scored ({trade.note})")
+    for label, trades in (
+        ("INDEX", report.index_trades),
+        ("STOCKS", report.stock_trades),
+    ):
+        if not trades:
             continue
-        mark = {"target": "✅", "stopped": "❌", "open": "⏳"}.get(
-            trade.outcome.value, "?"
-        )
-        lines.append(
-            f"  {mark} {name} {_money(trade.pnl)}  "
-            f"({_price(detail.entry_price)} → {_price(trade.exit_price)}, "
-            f"{trade.outcome.value})"
-        )
+        lines.append("")
+        lines.append(f"── {label} ──")
+        lines.extend(_trade_lines(trades))
+        wins, pnl, deployed = subtotal(trades)
+        scored = [t for t in trades if t.pnl is not None]
+        if scored:
+            lines.append(
+                f"   {label.title()}: {_money(pnl)} · {wins}/{len(scored)} won"
+                + (f" · {pnl / deployed * 100:+.1f}% of {_price(deployed)}" if deployed else "")
+            )
 
     lines.append("")
     if report.scored:
-        lines.append(f"Gross: {_money(report.total_pnl)} on {_price(report.deployed)} deployed")
+        lines.append(
+            f"TOTAL: {_money(report.total_pnl)} on {_price(report.deployed)} deployed"
+        )
     else:
         lines.append("Nothing could be scored today.")
 
@@ -225,6 +273,26 @@ def format_report(report: DailyReport) -> str:
         "stop and target counts as stopped; gross of brokerage and taxes."
     )
     return "\n".join(lines)
+
+
+def _trade_lines(trades: Sequence[ScoredTrade]) -> list[str]:
+    """Render one line per trade."""
+    lines: list[str] = []
+    for trade in trades:
+        detail = trade.run.run
+        name = detail.underlying or detail.tradingsymbol
+        if trade.pnl is None:
+            lines.append(f"  ? {name} — not scored ({trade.note})")
+            continue
+        mark = {"target": "✅", "stopped": "❌", "open": "⏳"}.get(
+            trade.outcome.value, "?"
+        )
+        lines.append(
+            f"  {mark} {name} {_money(trade.pnl)}  "
+            f"({_price(detail.entry_price)} → {_price(trade.exit_price)}, "
+            f"{trade.outcome.value})"
+        )
+    return lines
 
 
 def build_report(

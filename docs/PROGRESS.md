@@ -18,7 +18,7 @@ Tracks development status of TeleTrader against the phases in `CLAUDE.md`.
 | —     | FYERS broker + per-channel broker selection | ✅ Done (308 total) |
 | —     | Telegram bot notifications (signal + outcome) | ✅ Done (322 total) |
 | —     | Channel 2 shadow mode (FYERS payload, no order) + broker lot sizes | ✅ Done (424 total) |
-| —     | End-of-day shadow P&L summary (would the day have been profitable?) | ✅ Done (448 total) |
+| —     | End-of-day shadow P&L summary (would the day have been profitable?) | ✅ Done (463 total) |
 
 > Per `CLAUDE.md`: do not implement later phases unless explicitly requested.
 > The trade engine is the broker-agnostic decision layer (it *decides*, it does
@@ -934,6 +934,13 @@ counts as stopped; gross of brokerage and taxes.
 - **`FyersCandleSource`** — the broker's own `history` endpoint, so prices are what
   that contract actually traded at. One fetch per symbol per day (cached). A
   malformed bar is skipped rather than losing the day.
+- **Index vs stock split (2026-09-28)** — the summary totals **index and stock
+  options separately** (`is_index`, `DailyReport.index_trades` /
+  `.stock_trades`, `subtotal()`). Prompted by the back-test below: on this
+  channel they behave like two different strategies posted under one name, and a
+  single combined figure hides which one is working. Each section carries its own
+  P&L, win count and return on the capital that section used; a section with no
+  trades is omitted.
 - **Assumptions travel with the number** — the summary always states them
   (entry assumed filled at the signal's price; ambiguous bar = stopped; gross of
   costs). A P&L whose caveats are invisible is worse than no P&L, and these are
@@ -945,11 +952,50 @@ counts as stopped; gross of brokerage and taxes.
   fired at **15:35 IST, Mon-Fri** (`Persistent=true`, so a missed run still sends).
   `--print` renders without sending; `--date` re-scores an earlier day. With no
   FYERS token the report **still arrives**, with every trade unscored and saying so.
-- Tests: `test_eod.py` (21) + pipeline recording tests. Suite **448 passing**.
+- Tests: `test_eod.py` (21) + pipeline recording tests. Suite **463 passing**.
 
 **Known limits (stated, not hidden):** entry slippage is not modelled; brokerage,
 STT and exchange charges are not deducted; and an `open` trade is marked to the
 close rather than to a real square-off.
+
+## Back-test of the stored channel-2 signals (2026-09-28)
+
+Ran the 136 stored channel-2 signals against **real FYERS one-minute data** on
+the droplet: 1 lot each, entered at the signal's stated price, exited at the
+first target it names or its stop, whichever the contract reached first.
+
+**67 of 136 could be priced.** The FYERS symbol master carries only *live*
+contracts, so 65 signals from July to mid-August resolve to nothing (expired and
+delisted) and 4 underlyings were unresolvable. Those are reported as skipped
+rather than mispriced against a later expiry — resolving them to the current
+month would have produced plausible, meaningless numbers. The priced window is
+roughly **17 Aug – 25 Sep**.
+
+| Cut | Trades | Win rate | Gross P&L |
+| --- | ---: | ---: | ---: |
+| All priced | 67 | 51% | **-15,777** |
+| ...excluding 11 never filled | 56 | 61% | +180 |
+| **NIFTY only** | 25 | **92%** | **+15,600** |
+| **Stocks only** | 42 | 26% | **-31,377** |
+
+- Average win **+874** vs average loss **-1,379**: break-even needs ~61%, and the
+  stock signals deliver 26%.
+- **Zero** trades were decided by an ambiguous bar, so the pessimistic tie-break
+  did not shape the result.
+- 11 signals named an entry the price never reached — no real fill would have
+  happened. Excluding them the channel is flat, not profitable.
+- Indicative costs (₹40 brokerage + 0.1% STT on the sell + 0.05% exchange + GST):
+  all-priced nets ≈ **-21,600**; NIFTY-only nets ≈ **+13,900**.
+
+**Read with care:** 25 NIFTY trades is a small sample and 92% will not persist;
+entries are assumed filled exactly at the stated price (thin stock options would
+slip, so the stock figure flatters); and only the *first* target is taken, per
+the brief.
+
+This is what shadow mode was built for — it produced the evidence before any
+money was at risk. The end-of-day report was split index/stock as a direct
+result, and the obvious follow-up is a **per-channel underlying allowlist** so a
+channel can be limited to the instruments that actually work.
 
 ## Git state
 
@@ -1013,7 +1059,7 @@ close rather than to a real square-off.
 
 ## Next
 
-*(reviewed 2026-09-28; suite 448 passing)*
+*(reviewed 2026-09-28; suite 463 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.
