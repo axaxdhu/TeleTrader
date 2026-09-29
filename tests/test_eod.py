@@ -430,3 +430,28 @@ def test_section_subtotals_report_win_counts(repository: ShadowRepository) -> No
 
     assert "1/1 won" in text  # the index section
     assert "0/1 won" in text  # the stock section
+
+
+def test_a_fetch_failure_reports_its_cause_not_just_absence(
+    repository: ShadowRepository,
+) -> None:
+    # "No market data" and "your token expired" are different problems: one is
+    # fixable in a minute, the other is not. The reader must be able to tell.
+    _store(repository)
+    report = score_day(
+        repository, FakeCandles({}, failing="NSE:COFORGE26OCT1500CE"), day=DAY
+    )
+
+    assert report.trades[0].pnl is None
+    assert "Market data unavailable" in report.trades[0].note
+    assert "history unavailable" in report.trades[0].note
+
+
+def test_a_contract_that_simply_did_not_trade_says_that_instead(
+    repository: ShadowRepository,
+) -> None:
+    _store(repository)
+    report = score_day(repository, FakeCandles({}), day=DAY)  # empty, but no error
+
+    assert "No market data after the signal" in report.trades[0].note
+    assert "unavailable" not in report.trades[0].note

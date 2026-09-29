@@ -478,3 +478,89 @@ def test_protective_exits_never_reach_the_broker(
 
     assert result.status is ExecutionStatus.SUCCESS
     assert len(result.shadow.protective) == 2  # type: ignore[union-attr]
+
+
+# --- Why the balance could not be read ----------------------------------------
+#
+# FYERS reports an expired daily token INSIDE the response ({"s": "error"})
+# rather than by raising, so an unauthenticated call once looked identical to a
+# client with no funds endpoint: both gave a bare "balance not read". A dead
+# token ran unnoticed through two days of live shadowing. The reason must reach
+# the alert.
+
+
+def _expired() -> dict[str, object]:
+    """The real response FYERS returns for an expired daily token."""
+    return {"code": -16, "message": "Could not authenticate the user", "s": "error"}
+
+
+def test_an_expired_token_is_named_in_the_report(
+    repository: ExecutionRepository,
+) -> None:
+    result = _executor(repository, client=ExplodingFyers(funds=_expired())).execute(
+        _order()
+    )
+
+    assert result.shadow is not None
+    assert result.shadow.funds_ok is None
+    # The broker's own words, not a blank "balance not read".
+    assert "Could not authenticate the user" in result.shadow.funds_note
+
+
+def test_an_expired_token_is_logged_with_what_to_do(
+    repository: ExecutionRepository, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        _executor(repository, client=ExplodingFyers(funds=_expired())).execute(_order())
+
+    assert "Could not authenticate the user" in caplog.text
+    assert "fyers_login" in caplog.text  # points at the fix
+
+
+def test_a_missing_funds_endpoint_says_so_distinctly(
+    repository: ExecutionRepository,
+) -> None:
+    result = _executor(repository, client=FundlessFyers()).execute(_order())
+
+    assert result.shadow is not None
+    # Must not be confusable with an auth failure — that was the original bug.
+    assert "no funds endpoint" in result.shadow.funds_note
+    assert "authenticate" not in result.shadow.funds_note
+
+
+def test_a_raised_error_still_reports_its_cause(
+    repository: ExecutionRepository,
+) -> None:
+    result = _executor(
+        repository, client=ExplodingFyers(funds=RuntimeError("connection reset"))
+    ).execute(_order())
+
+    assert result.shadow is not None
+    assert "connection reset" in result.shadow.funds_note
+
+
+def test_a_response_without_a_balance_is_distinguished(
+    repository: ExecutionRepository,
+) -> None:
+    result = _executor(
+        repository,
+        client=ExplodingFyers(funds={"s": "ok", "fund_limit": [{"title": "Total Balance", "equityAmount": 5}]}),
+    ).execute(_order())
+
+    assert result.shadow is not None
+    assert "no available balance" in result.shadow.funds_note
+
+
+def test_an_unreadable_balance_never_blocks_the_payload(
+    repository: ExecutionRepository,
+) -> None:
+    # The contract and payload are the part the user acts on; a dead token must
+    # not cost them that.
+    result = _executor(repository, client=ExplodingFyers(funds=_expired())).execute(
+        _order()
+    )
+
+    assert result.status is ExecutionStatus.SUCCESS
+    assert result.shadow is not None
+    assert result.shadow.tradingsymbol == "NSE:COFORGE26OCT1500CE"
+    assert len(result.shadow.protective) == 2

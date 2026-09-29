@@ -997,6 +997,39 @@ money was at risk. The end-of-day report was split index/stock as a direct
 result, and the obvious follow-up is a **per-channel underlying allowlist** so a
 channel can be limited to the instruments that actually work.
 
+## Silent funds/data failures — found in live running (2026-09-30)
+
+**Symptom:** two days of live shadow alerts all read
+`Funds: Funds check unavailable (balance not read).` even though the FYERS
+credentials and a token were in place.
+
+**Cause (two parts):**
+1. **The token had expired.** `funds()` returned
+   `{'code': -16, 'message': 'Could not authenticate the user', 's': 'error'}`.
+   The login had been run at **03:36 IST**, and a FYERS access token is daily —
+   minted overnight, it died at the next cutoff, before the market opened. The
+   login must happen **in the morning before 09:15**, not the night before.
+2. **The code hid it.** FYERS reports auth failure *in the response dict*, not by
+   raising (the live executor already knew this; the shadow funds check did not).
+   `_available_from_funds` returned a bare `None` for an error response and
+   `_available_balance` only logged when the call *raised* — so an expired token
+   and a client with no funds endpoint produced identical, reasonless output.
+
+**Fix:** `_available_balance` now returns `(balance, problem)` and `_funds_error`
+extracts the broker's own message, so the alert reads
+`Funds check unavailable (Could not authenticate the user).` and a warning is
+logged pointing at `fyers_login.py`. The four causes — no endpoint, call raised,
+broker refused, no balance in the response — are now distinguishable.
+
+The **same defect existed in the end-of-day scorer**: a failed candle fetch was
+reported as "No market data after the signal", which is what a contract that
+simply never traded also says. `score_day` now carries the fetch error into the
+note (`Market data unavailable: ...`). One problem is fixable in a minute and the
+other is not, so the reader has to be able to tell them apart.
+
+Tests pin both, including that a dead token never costs the user the payload —
+the contract and protective legs are the part they act on. Suite **471 passing**.
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -1059,7 +1092,7 @@ channel can be limited to the instruments that actually work.
 
 ## Next
 
-*(reviewed 2026-09-28; suite 463 passing)*
+*(reviewed 2026-09-30; suite 471 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.

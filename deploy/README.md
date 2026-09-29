@@ -28,6 +28,22 @@ uv run python eod_report.py --print
 uv run python eod_report.py --date 2026-09-28 --print
 ```
 
+## The daily FYERS token
+
+`FYERS_ACCESS_TOKEN` expires **daily**, at a fixed cutoff. Run the login **in the
+morning before 09:15 IST** — a token minted overnight (e.g. 03:30) expires at
+that cutoff and is already dead when the market opens:
+
+```bash
+ssh -t root@64.227.151.139 "su - trader -c 'cd ~/TeleTrader && uv run python fyers_login.py --manual'"
+sudo systemctl restart teletrader
+```
+
+Without a live token the shadow alerts still arrive in full (symbol, expiry,
+quantity, protective exits) — only the funds check and the end-of-day P&L need
+it. Both now name the reason when it fails, e.g.
+`Funds check unavailable (Could not authenticate the user).`
+
 ## A note on the timer's timezone
 
 The server runs UTC, so the schedule carries its timezone **inline on

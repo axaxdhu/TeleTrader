@@ -299,9 +299,12 @@ class FyersShadowExecutor(FyersExecutor):
             return None, None, None, "Funds check skipped (no entry price)."
         required = round(price * order.quantity, 2)
 
-        available = self._available_balance()
+        available, problem = self._available_balance()
         if available is None:
-            return required, None, None, "Funds check unavailable (balance not read)."
+            # Say *why*. An expired daily token and a client with no funds
+            # endpoint used to produce the same blank "balance not read", which
+            # left a dead token invisible for two days of live running.
+            return required, None, None, f"Funds check unavailable ({problem})."
 
         if available >= required:
             return required, available, True, "Sufficient funds."
@@ -312,22 +315,48 @@ class FyersShadowExecutor(FyersExecutor):
             f"insufficient funds - needs {required:.2f}, available {available:.2f}",
         )
 
-    def _available_balance(self) -> float | None:
-        """Read the FYERS available balance, or ``None`` if it cannot be read.
+    def _available_balance(self) -> tuple[float | None, str]:
+        """Read the FYERS available balance, with the reason when it cannot be.
 
-        The funds endpoint is optional on the client Protocol (tests inject fakes
-        without it), and a missing or malformed response must degrade to "unknown"
-        rather than crash a shadow run — its job is to report, never to fail.
+        Returns ``(balance, problem)``; ``balance`` is ``None`` whenever the
+        figure could not be obtained, and ``problem`` then says what stopped it.
+
+        Carrying the reason matters more than it looks. FYERS reports an expired
+        daily token **inside the response** (``{"s": "error", ...}``) rather than
+        by raising, so an unauthenticated call used to look exactly like a client
+        with no funds endpoint: both returned a bare ``None``, and the alert said
+        only "balance not read". A dead token therefore ran unnoticed through two
+        days of live shadowing. Now the broker's own message reaches the alert and
+        the log.
+
+        A shadow run must still never fail over this — its job is to report.
         """
         funds = getattr(self._fyers, "funds", None)
         if not callable(funds):
-            return None
+            return None, "no funds endpoint on this client"
         try:
             response = funds()
         except Exception as exc:  # noqa: BLE001 — a shadow run must never crash
             logger.warning("[SHADOW] Could not read FYERS funds: %s", exc)
-            return None
-        return _available_from_funds(response)
+            return None, f"funds call failed: {exc}"
+
+        error = _funds_error(response)
+        if error is not None:
+            logger.warning(
+                "[SHADOW] FYERS refused the funds request: %s "
+                "(a daily access token expires — re-run fyers_login.py)",
+                error,
+            )
+            return None, error
+
+        balance = _available_from_funds(response)
+        if balance is None:
+            logger.warning(
+                "[SHADOW] No available balance in the FYERS funds response: %s",
+                str(response)[:200],
+            )
+            return None, "no available balance in the response"
+        return balance, ""
 
     @staticmethod
     def _log(result: ExecutionResult, report: ShadowReport) -> None:
@@ -389,6 +418,20 @@ class _UnauthenticatedClient:
 
     def orderbook(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
         return {"s": "ok", "orderBook": []}
+
+
+def _funds_error(response: Any) -> str | None:
+    """Return the broker's error message from a funds response, or ``None``.
+
+    FYERS signals failure in the payload rather than by raising, so this is the
+    only place an expired token announces itself.
+    """
+    if not isinstance(response, dict):
+        return "unreadable funds response"
+    if response.get("s") != "error":
+        return None
+    message = str(response.get("message") or "").strip()
+    return message or "FYERS refused the funds request"
 
 
 def _available_from_funds(response: Any) -> float | None:

@@ -196,6 +196,7 @@ def score_day(
     runs = repository.for_day(day, source=source)
     trades: list[ScoredTrade] = []
     candle_cache: dict[str, list[Candle]] = {}
+    fetch_errors: dict[str, str] = {}
 
     for run in runs:
         symbol = run.run.tradingsymbol
@@ -205,7 +206,19 @@ def score_day(
             except Exception as exc:  # noqa: BLE001 — a report must still be sent
                 logger.warning("Could not fetch candles for %s: %s", symbol, exc)
                 candle_cache[symbol] = []
+                fetch_errors[symbol] = str(exc)
         scored = score_run(run, candle_cache[symbol])
+        # A failed fetch is not the same as a contract that simply did not
+        # trade, and the reader needs to tell them apart: the first is usually
+        # an expired daily token and is fixable, the second is not.
+        if scored.pnl is None and symbol in fetch_errors:
+            scored = ScoredTrade(
+                run,
+                scored.outcome,
+                None,
+                None,
+                f"Market data unavailable: {fetch_errors[symbol]}",
+            )
         trades.append(scored)
         if persist and scored.pnl is not None:
             repository.score(
