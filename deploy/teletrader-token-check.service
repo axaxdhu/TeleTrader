@@ -1,0 +1,14 @@
+[Unit]
+Description=TeleTrader pre-market FYERS token check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/home/trader/TeleTrader
+Environment=HOME=/home/trader
+ExecStart=/home/trader/.local/bin/uv run python check_token.py
+# The check reports a dead token by exiting 1; that is information, not a
+# service fault, so systemd should not treat it as a failed unit.
+SuccessExitStatus=0 1

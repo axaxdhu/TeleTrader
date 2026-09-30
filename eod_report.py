@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from teletrader.config import Config, ConfigError
@@ -36,6 +36,13 @@ def main() -> int:
     parser.add_argument(
         "--date",
         help="Trading day to report on (YYYY-MM-DD). Default: today in the market timezone.",
+    )
+    parser.add_argument(
+        "--since",
+        help=(
+            "Report every trading day from this date (YYYY-MM-DD) up to --date. "
+            "Use to catch up after a spell without a valid token."
+        ),
     )
     parser.add_argument(
         "--source", default="channel2", help="Channel to report on (default: channel2)."
@@ -78,14 +85,26 @@ def main() -> int:
         logger.warning("No usable FYERS client (%s); trades will be unscored.", exc)
         candles = _NoCandles()
 
-    summary = build_report(repository, candles, day=day, source=args.source)
+    # A range re-scores each day in turn. Days are reported separately rather
+    # than merged: a single figure spanning several sessions hides which day the
+    # money was made or lost on.
+    first = date.fromisoformat(args.since) if args.since else day
+    if first > day:
+        print("--since must be on or before --date", file=sys.stderr)
+        return 1
+    days = [first + timedelta(days=n) for n in range((day - first).days + 1)]
 
-    if args.print_only:
-        print(summary)
-        return 0
-
-    create_notifier(config).notify(summary)
-    logger.info("End-of-day summary sent for %s (%s).", day.isoformat(), args.source)
+    notifier = None if args.print_only else create_notifier(config)
+    for current in days:
+        summary = build_report(repository, candles, day=current, source=args.source)
+        if notifier is None:
+            print(summary)
+            print()
+        else:
+            notifier.notify(summary)
+            logger.info(
+                "End-of-day summary sent for %s (%s).", current.isoformat(), args.source
+            )
     return 0
 
 

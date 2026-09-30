@@ -1,0 +1,12 @@
+[Unit]
+Description=Check the FYERS token before the market opens
+
+[Timer]
+# 08:45 IST on weekdays — half an hour before the 09:15 open, leaving time to
+# log in. The timezone is inline on OnCalendar: systemd has no Timezone= key and
+# ignores unknown keys silently (see deploy/README.md).
+OnCalendar=Mon..Fri 08:45 Asia/Kolkata
+Persistent=false
+
+[Install]
+WantedBy=timers.target

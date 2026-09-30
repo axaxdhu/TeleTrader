@@ -1030,6 +1030,31 @@ other is not, so the reader has to be able to tell them apart.
 Tests pin both, including that a dead token never costs the user the payload —
 the contract and protective legs are the part they act on. Suite **471 passing**.
 
+## Pre-market token check (completed 2026-10-01)
+
+Direct answer to the silent-token failure above: nothing checked the token until
+a signal arrived, so a dead one was invisible until the damage was done.
+`check_token.py` asks the broker **before the session** whether the token still
+works, via the read-only funds endpoint — the same call the shadow executor
+depends on, so a pass here means the thing that failed silently will now work.
+
+- **Alerts on failure only.** A healthy token sends nothing
+  (`format_token_alert` returns `None`): a warning that arrives every morning is
+  one nobody reads, and then a real one is missed too.
+- **Distinguishes a rejected token from a transport fault** (`TokenStatus.expired`).
+  Telling someone to re-authenticate because of a network blip wastes their
+  morning, so only an actual rejection prints the login command.
+- **Says signals are unaffected** — a dead token costs the funds check and the
+  P&L, not the payload alerts. Without that line the obvious reaction is to
+  assume the day is lost.
+- `deploy/teletrader-token-check.{service,timer}` — **08:45 IST, Mon-Fri**, half
+  an hour before the open. The unit sets `SuccessExitStatus=0 1` because the
+  check reports a dead token by exiting 1: information, not a service fault.
+- **`eod_report.py --since`** scores a range of days, one report each, to catch
+  up after a spell without a token. Days are kept separate deliberately: a single
+  figure spanning several sessions hides which day the money was made on.
+- Tests: `test_token_check.py` (12). Suite **481 passing**.
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -1092,7 +1117,7 @@ the contract and protective legs are the part they act on. Suite **471 passing**
 
 ## Next
 
-*(reviewed 2026-09-30; suite 471 passing)*
+*(reviewed 2026-10-01; suite 481 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.

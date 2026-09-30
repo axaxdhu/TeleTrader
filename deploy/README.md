@@ -8,24 +8,34 @@ supervised by systemd. These are the unit files it uses.
 | `teletrader.service` | the long-running listener (`main.py`); `Restart=on-failure` |
 | `teletrader-eod.service` | one-shot end-of-day P&L summary (`eod_report.py`) |
 | `teletrader-eod.timer` | fires the above at 15:35 IST, Mon-Fri |
+| `teletrader-token-check.service` | one-shot pre-market token check (`check_token.py`) |
+| `teletrader-token-check.timer` | fires the above at 08:45 IST, Mon-Fri |
 
-## Installing the end-of-day timer
+## Installing the timers
 
 ```bash
 sudo cp deploy/teletrader-eod.{service,timer} /etc/systemd/system/
+sudo cp deploy/teletrader-token-check.{service,timer} /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now teletrader-eod.timer
-systemctl list-timers teletrader-eod.timer   # confirm the next run
+sudo systemctl enable --now teletrader-eod.timer teletrader-token-check.timer
+systemctl list-timers 'teletrader-*'         # confirm the next runs
 ```
+
+The token check alerts **only on failure** — a warning that arrives every
+morning is one nobody reads. It reports a dead token by exiting 1, so the unit
+sets `SuccessExitStatus=0 1`: that is information, not a service fault.
 
 Run it by hand at any time (it is idempotent — scoring a day again just
 recomputes it):
 
 ```bash
-sudo systemctl start teletrader-eod.service   # send the summary now
+sudo systemctl start teletrader-token-check.service   # check the token now
+sudo systemctl start teletrader-eod.service           # send the summary now
 # or, as trader, without sending:
 uv run python eod_report.py --print
 uv run python eod_report.py --date 2026-09-28 --print
+uv run python eod_report.py --since 2026-09-28 --date 2026-09-30 --print  # catch up
+uv run python check_token.py --print
 ```
 
 ## The daily FYERS token
