@@ -13,13 +13,22 @@ morning is one nobody reads.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from dataclasses import dataclass
+from datetime import datetime, time, timezone, tzinfo
 from typing import Any
 
 from .execution.shadow import _available_from_funds, _funds_error
 from .logging_config import get_logger
 
-__all__ = ["TokenStatus", "format_token_alert", "probe_token"]
+__all__ = [
+    "TokenStatus",
+    "format_token_alert",
+    "probe_token",
+    "token_expiry",
+]
 
 logger = get_logger(__name__)
 
@@ -30,6 +39,11 @@ class TokenStatus:
 
     ok: bool
     detail: str
+    #: When the token stops being accepted, if it says so. FYERS issues a JWT
+    #: whose ``exp`` claim is a fixed **06:00 IST** cutoff — not 24 hours from
+    #: issue — so a token minted overnight can be hours from death when it is
+    #: created.
+    expires_at: datetime | None = None
 
     @property
     def expired(self) -> bool:
@@ -41,13 +55,60 @@ class TokenStatus:
         """
         return not self.ok and "could not authenticate" in self.detail.lower()
 
+    @property
+    def expires_early(self) -> bool:
+        """Whether the token works now but dies before the session ends.
 
-def probe_token(client: Any) -> TokenStatus:
-    """Ask the broker whether the token still works.
+        Its own fault to fix — the same login solves it — so it is grouped with
+        an expired token when advising what to do.
+        """
+        return not self.ok and "will not last the session" in self.detail
+
+
+def token_expiry(token: str | None, *, tz: tzinfo = timezone.utc) -> datetime | None:
+    """Read a FYERS access token's own expiry, or ``None`` if it does not say.
+
+    The token is a JWT whose payload carries an ``exp`` claim. Only that claim is
+    read; the signature is not verified, because this is not an authorisation
+    decision — the broker makes that. It is simply the token stating when it
+    stops working, which is far better than guessing.
+    """
+    if not token:
+        return None
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1]
+    try:
+        raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        claims = json.loads(raw)
+        expires = int(claims["exp"])
+    except (binascii.Error, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return datetime.fromtimestamp(expires, tz=timezone.utc).astimezone(tz)
+
+
+def probe_token(
+    client: Any,
+    *,
+    token: str | None = None,
+    market_close: time | None = None,
+    now: datetime | None = None,
+    tz: tzinfo = timezone.utc,
+) -> TokenStatus:
+    """Ask the broker whether the token works — and whether it will last the day.
 
     Uses the funds endpoint because it is read-only, cheap, and the same call the
-    shadow executor depends on — so a pass here means the thing that failed
+    shadow executor depends on, so a pass here means the thing that failed
     silently before will now work.
+
+    "Works right now" is not the question that matters, though. FYERS tokens
+    expire at a fixed **06:00 IST** cutoff rather than a fixed age, so one minted
+    at 01:00 is accepted when it is made and dead three hours before the market
+    opens. When the token declares an expiry and ``market_close`` is known, a
+    token that will not survive the session is reported as a failure even though
+    the broker is currently accepting it — otherwise the check passes at 08:45
+    and the session still runs blind.
     """
     funds = getattr(client, "funds", None)
     if not callable(funds):
@@ -61,14 +122,32 @@ def probe_token(client: Any) -> TokenStatus:
 
     error = _funds_error(response)
     if error is not None:
-        return TokenStatus(False, error)
+        return TokenStatus(False, error, token_expiry(token, tz=tz))
 
     if _available_from_funds(response) is None:
         # Authenticated, but the response is not what the funds check expects —
         # worth flagging rather than calling the token healthy.
-        return TokenStatus(False, "authenticated, but no available balance in the response")
+        return TokenStatus(
+            False,
+            "authenticated, but no available balance in the response",
+            token_expiry(token, tz=tz),
+        )
 
-    return TokenStatus(True, "token accepted")
+    expires_at = token_expiry(token, tz=tz)
+    if expires_at is not None and market_close is not None:
+        moment = (now or datetime.now(timezone.utc)).astimezone(tz)
+        closes_at = moment.replace(
+            hour=market_close.hour, minute=market_close.minute, second=0, microsecond=0
+        )
+        if expires_at < closes_at:
+            return TokenStatus(
+                False,
+                f"token expires at {expires_at:%H:%M}, before the {market_close:%H:%M} "
+                "close — it will not last the session",
+                expires_at,
+            )
+
+    return TokenStatus(True, "token accepted", expires_at)
 
 
 def format_token_alert(status: TokenStatus, *, market_open: str = "09:15") -> str | None:
@@ -81,7 +160,20 @@ def format_token_alert(status: TokenStatus, *, market_open: str = "09:15") -> st
         return None
 
     lines = ["⚠️ FYERS token check FAILED", status.detail, ""]
-    if status.expired:
+    if status.expires_at is not None:
+        lines.append(f"Token expiry: {status.expires_at:%Y-%m-%d %H:%M} (it says so itself)")
+        lines.append("")
+    if status.expires_early:
+        # Distinct from an expired token: the broker accepts it *now*, which is
+        # exactly why this would otherwise pass unnoticed until mid-session.
+        lines.append(
+            "The broker accepts it at the moment, but it dies before the close. "
+            "FYERS tokens expire at a fixed 06:00 IST cutoff rather than a fixed "
+            f"age, so one made overnight is already doomed. Log in again after "
+            f"06:00 and before {market_open}:"
+        )
+        lines.append("  uv run python fyers_login.py --manual")
+    elif status.expired:
         lines.append(
             f"The daily token has expired. Log in before {market_open} or today "
             "will have no funds check and no end-of-day P&L:"

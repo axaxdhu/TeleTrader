@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from zoneinfo import ZoneInfo
 
 from teletrader.config import Config, ConfigError
 from teletrader.execution.fyers import _build_client
@@ -47,12 +48,25 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 — a missing token is the thing we report
         status = TokenStatus(False, str(exc))
     else:
-        status = probe_token(client)
+        # The token is checked against the market close, not just "does it work
+        # now": FYERS expires tokens at a fixed 06:00 IST cutoff, so one made
+        # overnight passes a naive check and still dies before the open.
+        status = probe_token(
+            client,
+            token=config.fyers_access_token,
+            market_close=config.market_close,
+            tz=ZoneInfo(config.market_timezone),
+        )
 
     if status.ok:
-        logger.info("FYERS token check passed.")
+        until = (
+            f" (valid until {status.expires_at:%H:%M})"
+            if status.expires_at is not None
+            else ""
+        )
+        logger.info("FYERS token check passed%s.", until)
         if args.print_only:
-            print("✅ FYERS token is alive.")
+            print(f"✅ FYERS token is alive{until}.")
         return 0
 
     logger.warning("FYERS token check FAILED: %s", status.detail)

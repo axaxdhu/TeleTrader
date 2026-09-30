@@ -40,14 +40,20 @@ uv run python check_token.py --print
 
 ## The daily FYERS token
 
-`FYERS_ACCESS_TOKEN` expires **daily**, at a fixed cutoff. Run the login **in the
-morning before 09:15 IST** — a token minted overnight (e.g. 03:30) expires at
-that cutoff and is already dead when the market opens:
+`FYERS_ACCESS_TOKEN` expires at a fixed **06:00 IST** cutoff — *not* 24 hours
+after it is issued. This is read straight from the token's own JWT `exp` claim,
+not folklore. So the login window is **06:00 to 09:15 IST**: a token minted at
+01:00 is accepted the moment it is made and dead three hours before the market
+opens. Two sessions were lost to exactly that.
 
 ```bash
 ssh -t root@64.227.151.139 "su - trader -c 'cd ~/TeleTrader && uv run python fyers_login.py --manual'"
 sudo systemctl restart teletrader
 ```
+
+The 08:45 check therefore verifies the token will survive to the **close**, not
+merely that the broker accepts it right now — an overnight token passes the
+naive test and still leaves the session blind.
 
 Without a live token the shadow alerts still arrive in full (symbol, expiry,
 quantity, protective exits) — only the funds check and the end-of-day P&L need

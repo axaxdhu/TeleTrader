@@ -1053,7 +1053,20 @@ depends on, so a pass here means the thing that failed silently will now work.
 - **`eod_report.py --since`** scores a range of days, one report each, to catch
   up after a spell without a token. Days are kept separate deliberately: a single
   figure spanning several sessions hides which day the money was made on.
-- Tests: `test_token_check.py` (12). Suite **481 passing**.
+- **The token states its own expiry, so stop guessing** (2026-10-01). The FYERS
+  access token is a JWT; `token_expiry()` reads its `exp` claim (signature not
+  verified — this is not an authorisation decision, just the token saying when it
+  stops working). Measured on a real token: issued **01:01 IST**, expires
+  **06:00 IST**. So FYERS expires tokens at a **fixed 06:00 IST cutoff, not a
+  fixed age** — which is why an overnight login kept producing dead tokens, and
+  why the login window is **06:00–09:15 IST**.
+- **The check now asks whether the token survives the session**, not whether it
+  works this second: given a declared expiry earlier than the market close, it
+  fails even while the broker is still accepting it (`TokenStatus.expires_early`),
+  because that is precisely the case that passes a naive check at 08:45 and
+  leaves the day blind. The alert explains the cutoff rather than just the
+  symptom, and a token that declares no expiry is never failed for that alone.
+- Tests: `test_token_check.py` (22). Suite **491 passing**.
 
 ## Git state
 
@@ -1117,7 +1130,7 @@ depends on, so a pass here means the thing that failed silently will now work.
 
 ## Next
 
-*(reviewed 2026-10-01; suite 481 passing)*
+*(reviewed 2026-10-01; suite 491 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.
