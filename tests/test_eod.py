@@ -532,3 +532,48 @@ def test_no_fundable_line_when_everything_was_affordable(
     # Saying it every day would be noise.
     assert "of which fundable" not in text
     assert "not funded" not in text
+
+
+def test_pre_v10_unaffordable_runs_are_backfilled(
+    connection: sqlite3.Connection, repository: ShadowRepository
+) -> None:
+    # Rows written before funds_ok existed keep NULL, which reads as "unknown"
+    # and therefore takeable — overstating what the balance could have captured.
+    # The executor records the shortfall in remarks, so they can be identified
+    # exactly. (Migration v11; simulated here by clearing the column.)
+    run_id = _store(repository, funds_ok=False)
+    connection.execute(
+        "UPDATE shadow_runs SET funds_ok = NULL, accepted = 0,"
+        " remarks = 'Would NOT go through: insufficient funds - needs 9165.00,"
+        " available 0.00 (NSE:X).' WHERE id = ?",
+        (run_id,),
+    )
+    connection.commit()
+    connection.execute(
+        "UPDATE shadow_runs SET funds_ok = 0 WHERE funds_ok IS NULL"
+        " AND accepted = 0 AND remarks LIKE '%insufficient funds%'"
+    )
+    connection.commit()
+
+    assert repository.for_day(DAY)[0].run.funds_ok is False
+
+
+def test_a_run_refused_for_another_reason_stays_unknown(
+    connection: sqlite3.Connection, repository: ShadowRepository
+) -> None:
+    # Only the funds case is identifiable from the remarks; anything else must
+    # keep NULL rather than being guessed into a verdict.
+    run_id = _store(repository)
+    connection.execute(
+        "UPDATE shadow_runs SET funds_ok = NULL, accepted = 0,"
+        " remarks = 'Order rejected: quantity must be positive' WHERE id = ?",
+        (run_id,),
+    )
+    connection.commit()
+    connection.execute(
+        "UPDATE shadow_runs SET funds_ok = 0 WHERE funds_ok IS NULL"
+        " AND accepted = 0 AND remarks LIKE '%insufficient funds%'"
+    )
+    connection.commit()
+
+    assert repository.for_day(DAY)[0].run.funds_ok is None

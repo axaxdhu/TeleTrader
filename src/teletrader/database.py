@@ -236,6 +236,19 @@ _MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE shadow_runs ADD COLUMN funds_ok INTEGER;
     """,
+    # v11 — backfill `funds_ok` for runs recorded before v10 existed. Without
+    # this they keep NULL, which the report reads as "affordability unknown" and
+    # therefore counts as takeable — overstating what the balance could actually
+    # have captured. The executor writes the shortfall into `remarks`, so the
+    # rejected ones can be identified exactly rather than guessed at; anything
+    # refused for another reason is deliberately left NULL.
+    """
+    UPDATE shadow_runs
+       SET funds_ok = 0
+     WHERE funds_ok IS NULL
+       AND accepted = 0
+       AND remarks LIKE '%insufficient funds%';
+    """,
 )
 
 #: The schema version this build expects. Equals the number of migrations.
