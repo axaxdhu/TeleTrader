@@ -59,8 +59,11 @@ def main() -> int:
         )
 
     if status.ok:
+        # The date matters as much as the time: FYERS rolls the expiry to the
+        # next 06:00 IST boundary, so "valid until 06:00" is reassuring when it
+        # means tomorrow and alarming when it means this morning.
         until = (
-            f" (valid until {status.expires_at:%H:%M})"
+            f" (valid until {status.expires_at:%a %d %b %H:%M})"
             if status.expires_at is not None
             else ""
         )
