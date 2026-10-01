@@ -98,6 +98,15 @@ class ScoredTrade:
     pnl: float | None
     note: str = ""
 
+    @property
+    def takeable(self) -> bool:
+        """Whether the account could actually have funded this trade.
+
+        Separate from the P&L on purpose: the signal's quality and the balance
+        on the day are different facts, and conflating them hides both.
+        """
+        return self.run.run.funds_ok is not False
+
 
 @dataclass(frozen=True, slots=True)
 class DailyReport:
@@ -125,6 +134,16 @@ class DailyReport:
 
     def count(self, outcome: Outcome) -> int:
         return sum(1 for t in self.trades if t.outcome is outcome)
+
+    @property
+    def untakeable(self) -> tuple[ScoredTrade, ...]:
+        """Scored trades the account could not have funded."""
+        return tuple(t for t in self.scored if not t.takeable)
+
+    @property
+    def takeable_pnl(self) -> float:
+        """P&L of the trades that could actually have been funded."""
+        return sum(t.pnl or 0.0 for t in self.scored if t.takeable)
 
     @property
     def index_trades(self) -> tuple[ScoredTrade, ...]:
@@ -155,10 +174,12 @@ def score_run(run: StoredShadowRun, candles: Sequence[Candle]) -> ScoredTrade:
     pessimistic way rather than the flattering one.
     """
     detail = run.run
-    if not detail.accepted:
-        return ScoredTrade(
-            run, Outcome.UNKNOWN, None, None, "Order would not have been accepted."
-        )
+    # Note what is deliberately *not* checked here: whether the order would have
+    # been accepted. An account that could not fund a trade says nothing about
+    # whether the signal was any good, and skipping those runs made the whole
+    # report blank for an empty account — answering a question nobody asked.
+    # Every stored run already has a resolved contract, so all of them are
+    # priceable; takeability is reported alongside, not instead.
     entry = detail.entry_price
     if entry is None:
         return ScoredTrade(run, Outcome.UNKNOWN, None, None, "No entry price.")
@@ -271,6 +292,15 @@ def format_report(report: DailyReport) -> str:
         lines.append(
             f"TOTAL: {_money(report.total_pnl)} on {_price(report.deployed)} deployed"
         )
+        # The headline measures the signals. What the balance could actually
+        # have captured is a different number, and only worth saying when the
+        # two differ — otherwise it is noise.
+        if report.untakeable:
+            lines.append(
+                f"  of which fundable: {_money(report.takeable_pnl)} "
+                f"({len(report.untakeable)} trade(s) the balance could not cover, "
+                "marked ⟨not funded⟩)"
+            )
     else:
         lines.append("Nothing could be scored today.")
 
@@ -300,10 +330,11 @@ def _trade_lines(trades: Sequence[ScoredTrade]) -> list[str]:
         mark = {"target": "✅", "stopped": "❌", "open": "⏳"}.get(
             trade.outcome.value, "?"
         )
+        suffix = "" if trade.takeable else "  ⟨not funded⟩"
         lines.append(
             f"  {mark} {name} {_money(trade.pnl)}  "
             f"({_price(detail.entry_price)} → {_price(trade.exit_price)}, "
-            f"{trade.outcome.value})"
+            f"{trade.outcome.value}){suffix}"
         )
     return lines
 

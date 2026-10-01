@@ -49,6 +49,10 @@ class ShadowRun:
     lot_size: int
     accepted: bool
     protected: bool
+    #: Whether the account could have funded it: ``True``/``False``, or ``None``
+    #: when it was never determined. Kept apart from ``accepted`` because an
+    #: unaffordable signal is still a signal worth scoring.
+    funds_ok: bool | None = None
     signal_id: int | None = None
     underlying: str | None = None
     entry_price: float | None = None
@@ -98,8 +102,9 @@ class ShadowRepository:
                 INSERT INTO shadow_runs (
                     signal_id, source, trade_date, created_at, tradingsymbol,
                     exchange, expiry, underlying, quantity, lot_size,
-                    entry_price, stop_loss, target, accepted, protected, remarks
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    entry_price, stop_loss, target, accepted, protected, remarks,
+                    funds_ok
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.signal_id,
@@ -118,6 +123,7 @@ class ShadowRepository:
                     int(run.accepted),
                     int(run.protected),
                     run.remarks,
+                    None if run.funds_ok is None else int(run.funds_ok),
                 ),
             )
         return int(cursor.lastrowid or 0)
@@ -181,6 +187,7 @@ def run_from_execution(
         lot_size=report.lot_size,
         accepted=result.status is ExecutionStatus.SUCCESS,
         protected=report.fully_protected,
+        funds_ok=report.funds_ok,
         signal_id=signal_id,
         underlying=order.underlying,
         entry_price=order.entry_price,
@@ -205,6 +212,7 @@ def _row_to_run(row: sqlite3.Row) -> StoredShadowRun:
             lot_size=int(row["lot_size"]),
             accepted=bool(row["accepted"]),
             protected=bool(row["protected"]),
+            funds_ok=None if row["funds_ok"] is None else bool(row["funds_ok"]),
             signal_id=row["signal_id"],
             underlying=row["underlying"],
             entry_price=row["entry_price"],

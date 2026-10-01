@@ -1068,6 +1068,31 @@ depends on, so a pass here means the thing that failed silently will now work.
   symptom, and a token that declares no expiry is never failed for that alone.
 - Tests: `test_token_check.py` (22). Suite **491 passing**.
 
+## Score every signal, funded or not (2026-10-02)
+
+**Symptom:** with no balance in the FYERS account, the shadow executor rejected
+every order for insufficient funds, and `score_run` skipped anything not
+accepted — so the end-of-day P&L came back **empty**. The report was answering
+"what could you have traded?" when the question is "were the signals any good?".
+
+Those are different facts and the report now keeps them apart:
+
+- **Scoring no longer gates on acceptance.** Every stored run already has a
+  resolved contract (`run_from_execution` only records one when the symbol
+  resolved), so all of them are priceable. Whether the balance could fund a trade
+  says nothing about whether the signal was right.
+- **Migration v10 adds `funds_ok`** to `shadow_runs` — `accepted` lumps "could
+  not afford it" together with every other refusal, and only the former should be
+  reported as a footnote rather than a disqualification. NULL when it was never
+  determined (no token, or a sell), and **unknown is not treated as unaffordable**
+  — otherwise a normal day with no token would mark every trade.
+- **The headline total measures the signals**; a second line, shown only when the
+  two differ, gives what the balance could actually have captured. Unfundable
+  trades are marked `⟨not funded⟩` inline.
+- Tests pin all three: unfunded trades count toward the total, the fundable line
+  appears only when it differs, and `funds_ok=None` stays takeable.
+  Suite **496 passing**.
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -1130,7 +1155,7 @@ depends on, so a pass here means the thing that failed silently will now work.
 
 ## Next
 
-*(reviewed 2026-10-01; suite 491 passing)*
+*(reviewed 2026-10-02; suite 496 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.

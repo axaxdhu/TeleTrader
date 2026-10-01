@@ -72,6 +72,11 @@ would have been worth. A systemd timer (`deploy/teletrader-eod.timer`) fires it
 at 15:35 IST on weekdays; `--print` renders it without sending and `--date`
 re-scores an earlier day.
 
+Every signal is scored, including ones the account could not have funded — the
+question is whether the signals were any good, which is independent of the
+balance on the day. Those are marked `⟨not funded⟩` and a second line gives what
+the balance could actually have captured, shown only when it differs.
+
 Index and stock options are totalled **separately** — on a channel that posts
 both they can behave like two different strategies, and one combined figure
 hides which is working.

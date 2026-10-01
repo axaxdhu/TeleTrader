@@ -227,6 +227,15 @@ _MIGRATIONS: tuple[str, ...] = (
     );
     CREATE INDEX idx_shadow_runs_date ON shadow_runs(trade_date, source);
     """,
+    # v10 — tell "could not afford it" apart from the other reasons an order
+    # would have been refused. `accepted` lumps them together, and scoring used
+    # to skip every unaccepted run — so an empty trading account made the whole
+    # P&L report blank, which answers the wrong question. Whether the *signal*
+    # was any good is independent of whether that day's balance could fund it.
+    # NULL where it was never determined (no token, or a sell).
+    """
+    ALTER TABLE shadow_runs ADD COLUMN funds_ok INTEGER;
+    """,
 )
 
 #: The schema version this build expects. Equals the number of migrations.

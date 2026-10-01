@@ -136,12 +136,29 @@ def test_no_market_data_is_unscored_not_flat() -> None:
     assert scored.pnl is None
 
 
-def test_a_rejected_order_is_not_priced() -> None:
-    scored = score_run(_run(accepted=False), [_candle(1, 70, 80)])
+def test_an_order_the_balance_could_not_fund_is_still_priced() -> None:
+    # Whether the account had the money says nothing about whether the signal
+    # was any good. Skipping these made the whole report blank for an empty
+    # account, which answers a question nobody asked.
+    scored = score_run(_run(accepted=False, funds_ok=False), [_candle(1, 70, 74)])
 
-    assert scored.outcome is Outcome.UNKNOWN
-    assert scored.pnl is None
-    assert "not have been accepted" in scored.note
+    assert scored.outcome is Outcome.TARGET
+    assert scored.pnl == pytest.approx(300.0)
+    assert scored.takeable is False
+
+
+def test_an_affordable_trade_is_marked_takeable() -> None:
+    scored = score_run(_run(funds_ok=True), [_candle(1, 70, 74)])
+
+    assert scored.takeable is True
+
+
+def test_an_undetermined_funds_check_is_not_treated_as_unaffordable() -> None:
+    # funds_ok is None when it could not be checked at all (no token). Treating
+    # unknown as "could not afford" would quietly mark a normal day's trades.
+    scored = score_run(_run(funds_ok=None), [_candle(1, 70, 74)])
+
+    assert scored.takeable is True
 
 
 def test_a_trade_with_no_stop_can_still_reach_its_target() -> None:
@@ -455,3 +472,63 @@ def test_a_contract_that_simply_did_not_trade_says_that_instead(
 
     assert "No market data after the signal" in report.trades[0].note
     assert "unavailable" not in report.trades[0].note
+
+
+# --- Signal quality vs. what the balance could fund ---------------------------
+#
+# These are different facts and the report keeps them apart: the headline
+# measures the signals, and a second line says what the account could actually
+# have captured — but only when the two differ.
+
+
+def test_unfunded_trades_count_toward_the_total(repository: ShadowRepository) -> None:
+    _store(repository, funds_ok=False)
+    _store(repository, tradingsymbol="NSE:NIFTY26OCT23300PE", underlying="NIFTY",
+           quantity=65, lot_size=65, entry_price=131.0, stop_loss=120.0, target=142.0,
+           funds_ok=True)
+    candles = FakeCandles(
+        {
+            "NSE:COFORGE26OCT1500CE": [_candle(1, 70, 74)],   # +300, unfunded
+            "NSE:NIFTY26OCT23300PE": [_candle(1, 130, 143)],  # +715, funded
+        }
+    )
+
+    report = score_day(repository, candles, day=DAY)
+
+    assert report.total_pnl == pytest.approx(1015.0)   # what the signals were worth
+    assert report.takeable_pnl == pytest.approx(715.0)  # what the balance could take
+    assert len(report.untakeable) == 1
+
+
+def test_the_summary_marks_and_separates_unfunded_trades(
+    repository: ShadowRepository,
+) -> None:
+    _store(repository, funds_ok=False)
+    text = format_report(
+        score_day(
+            repository,
+            FakeCandles({"NSE:COFORGE26OCT1500CE": [_candle(1, 70, 74)]}),
+            day=DAY,
+        )
+    )
+
+    assert "⟨not funded⟩" in text
+    assert "TOTAL: +300" in text
+    assert "of which fundable: +0" in text
+
+
+def test_no_fundable_line_when_everything_was_affordable(
+    repository: ShadowRepository,
+) -> None:
+    _store(repository, funds_ok=True)
+    text = format_report(
+        score_day(
+            repository,
+            FakeCandles({"NSE:COFORGE26OCT1500CE": [_candle(1, 70, 74)]}),
+            day=DAY,
+        )
+    )
+
+    # Saying it every day would be noise.
+    assert "of which fundable" not in text
+    assert "not funded" not in text
