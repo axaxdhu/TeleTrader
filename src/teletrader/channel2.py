@@ -51,13 +51,21 @@ _NUM = r"\d+(?:\.\d+)?"
 # non-greedy so it stops at the strike; it may be multi-word (stock names). Entry
 # follows "above" (breakout) or occasionally "at"; a trailing range ("at 159-155")
 # is tolerated and only the first number is taken as the entry.
+# Qualifiers the channel appends to a header without changing what it means —
+# "Nifty 22750 pe above 135 **add**". Three real NIFTY signals were silently
+# lost to that one word. The set is explicit rather than "any trailing text":
+# a header that ends in something unrecognised should still be refused, since
+# the alternative is parsing "above 135 add to watchlist" as an entry.
+_TRAILING_QUALIFIER = r"(?:\s+(?:add(?:\s+more)?|addon|more|buy|only|active))?"
+
 _HEADER_RE = re.compile(
     rf"^(?P<underlying>.+?)\s+"
     rf"(?P<strike>\d+)\s+"
     rf"(?P<option_type>ce|pe)\s+"
     rf"(?:above|at)\s+"
     rf"(?P<entry>{_NUM})"
-    rf"(?:\s*[-–]\s*{_NUM})?$",
+    rf"(?:\s*[-–]\s*{_NUM})?"
+    rf"{_TRAILING_QUALIFIER}$",
     re.IGNORECASE,
 )
 
@@ -73,8 +81,11 @@ _LEAD_IN_RE = re.compile(
 # Field lines, matched anywhere in the message regardless of order. A stray
 # leading dot (".lot 65", seen in real messages) is tolerated.
 _SL_RE = re.compile(rf"^\.?\s*SL\s+(?P<sl>{_NUM})$", re.IGNORECASE)
+# The target label is written in full, abbreviated, or as a bare "T" — all three
+# appear in real messages. ``\b`` keeps "T" from swallowing other T-words.
 _TARGET_RE = re.compile(
-    rf"^\.?\s*TARGET\s+(?P<targets>{_NUM}(?:\s*,\s*{_NUM})*)\s*(?P<open>\++)?$",
+    rf"^\.?\s*(?:TARGETS?|TGTS?|T)\b\s*"
+    rf"(?P<targets>{_NUM}(?:\s*,\s*{_NUM})*)\s*(?P<open>\++)?$",
     re.IGNORECASE,
 )
 

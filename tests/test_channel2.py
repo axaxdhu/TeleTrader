@@ -215,3 +215,75 @@ def test_real_multi_word_stock_signals_still_parse(
     assert signal is not None
     assert signal.underlying == underlying
     assert signal.strike == strike
+
+
+# --- NIFTY signals lost in live running (found 2026-10-15) --------------------
+#
+# Three real NIFTY entries were silently dropped over ten days. All three ended
+# their header with the word "add", which the end-anchored regex refused. The
+# index signals are the ones that might be worth trading, so losing exactly
+# those was the worst possible failure mode.
+
+
+@pytest.mark.parametrize(
+    ("message", "entry", "stop", "target"),
+    [
+        (
+            "Nifty 22750 pe above 135 add\n\nSl 121\n\nTarget 150, 165, 180+++\n\nLot 65",
+            135.0, 121.0, 150.0,
+        ),
+        (
+            "Nifty 22350 ce at 145-150 add\n\nSl 139\n\nTarget 165, 180, 200\n\nLot 65",
+            145.0, 139.0, 165.0,
+        ),
+        (
+            # Also uses a bare "T" for the target label.
+            "Nifty 22750 pe at 150-145 add\n\nSl 138\n\nT 156, 167, 180++\n\nCmp150\n\nLot 65",
+            150.0, 138.0, 156.0,
+        ),
+    ],
+)
+def test_headers_ending_in_a_qualifier_parse(
+    message: str, entry: float, stop: float, target: float
+) -> None:
+    signal = parse_channel2_signal(message)
+
+    assert signal is not None
+    assert signal.underlying == "NIFTY"
+    assert (signal.entry_price, signal.stop_loss, signal.target) == (entry, stop, target)
+
+
+@pytest.mark.parametrize("label", ["Target", "Targets", "Tgt", "T"])
+def test_every_spelling_of_the_target_label_is_read(label: str) -> None:
+    signal = parse_channel2_signal(
+        f"Nifty 22750 pe above 135\n\nSl 121\n\n{label} 150, 165++"
+    )
+
+    assert signal is not None
+    assert signal.target == 150.0
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Watchlist mentions: no stop, no target — not entries, however much
+        # they look like one. These must keep being refused.
+        "Nifty 22450 ce add to watchlist",
+        "Nifty 22500 pe to watchlist",
+        "Nifty 22650 pe add to watch list",
+        "Laurus lab 2060 pe Add to watchlist",
+        # Narration.
+        "Its 22750 pe \n\nActive✅, strict SL\n\nSimple pull back entry towards the trend",
+        "22700 pe moved while typing. Will renter if we get a pull back.",
+    ],
+)
+def test_loosening_the_header_did_not_let_chatter_through(message: str) -> None:
+    assert parse_channel2_signal(message) is None
+
+
+def test_an_unrecognised_trailing_word_is_still_refused() -> None:
+    # The qualifier list is explicit on purpose: accepting any trailing text
+    # would turn "above 135 add to watchlist" into an entry.
+    assert parse_channel2_signal(
+        "Nifty 22750 pe above 135 maybe later\n\nSl 121\n\nTarget 150"
+    ) is None

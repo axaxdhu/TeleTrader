@@ -1127,6 +1127,34 @@ three-hour window. Of 15 unscored runs by 15 Oct, **7 are gone for good**.
   `FYERS_REFRESH_TOKEN` are both set; without them the manual login is unchanged.
 - Tests: `test_fyers_auth.py` (15). Suite **513 passing**.
 
+## Lost NIFTY signals — parser gaps found in live running (2026-10-15)
+
+The user noticed the index signals were not always being caught. The MISSED
+alerts (built for exactly this) had been logging them all along: **11 flagged
+messages over two weeks, of which 3 were real NIFTY entries silently dropped.**
+
+| Cause | Example | Count |
+| --- | --- | --- |
+| Header ends in a qualifier | `Nifty 22750 pe above 135 **add**` | 3 |
+| Target labelled `T` | `T 156, 167, 180++` | 1 (same messages) |
+
+The header regex is end-anchored, so one trailing word refused the whole signal.
+Fixes: an explicit `_TRAILING_QUALIFIER` set (`add`, `add more`, `addon`, `more`,
+`buy`, `only`, `active`) and a target label of `TARGET(S)` / `TGT(S)` / `T` with a
+word boundary. The qualifier list is deliberately **explicit rather than "any
+trailing text"** — the latter would parse `above 135 add to watchlist` as an
+entry.
+
+The other 8 flagged messages were **correctly** refused: watchlist mentions
+(`Nifty 22450 ce add to watchlist`) and narration, none carrying a stop or a
+target. Tests assert they stay refused, since loosening the header is exactly
+how chatter starts getting through.
+
+**Worth noting about the cost:** the dropped signals were all NIFTY, the only
+category the evidence suggests might be profitable — the worst possible
+selection bias. And the MISSED alerts had been firing on Telegram the whole time.
+Suite **527 passing**.
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -1189,7 +1217,7 @@ three-hour window. Of 15 unscored runs by 15 Oct, **7 are gone for good**.
 
 ## Next
 
-*(reviewed 2026-10-15; suite 513 passing)*
+*(reviewed 2026-10-15; suite 527 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.
