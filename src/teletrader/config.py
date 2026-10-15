@@ -69,6 +69,9 @@ class Config:
     fyers_app_id: str | None = None
     fyers_secret_id: str | None = None
     fyers_access_token: str | None = None
+    #: Optional, for the unattended daily refresh only (see teletrader.fyers_auth).
+    fyers_refresh_token: str | None = None
+    fyers_pin: str | None = None
     # --- Per-channel broker selection ----------------------------------------
     # Each channel can route to its own broker independently. An unset override
     # falls back to ``execution_mode`` (the global default), so existing
@@ -296,6 +299,11 @@ def _parse_fyers_credentials(referenced_modes: set[str]) -> dict[str, str | None
         "fyers_app_id": os.getenv("FYERS_APP_ID") or None,
         "fyers_secret_id": os.getenv("FYERS_SECRET_ID") or None,
         "fyers_access_token": os.getenv("FYERS_ACCESS_TOKEN") or None,
+        # Optional, and only for the unattended daily refresh: a refresh token
+        # (~15 days) plus the account PIN can mint a fresh access token with no
+        # browser. Absent by default — storing a PIN is the user's call.
+        "fyers_refresh_token": os.getenv("FYERS_REFRESH_TOKEN") or None,
+        "fyers_pin": os.getenv("FYERS_PIN") or None,
     }
     if referenced_modes & _FYERS_MODES:
         _require_credentials(

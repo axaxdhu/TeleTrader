@@ -41,6 +41,7 @@ from dotenv import load_dotenv
 
 _ENV_VAR = "FYERS_ACCESS_TOKEN"
 _DEFAULT_ENV = Path(__file__).resolve().parent / ".env"
+_REFRESH_VAR = "FYERS_REFRESH_TOKEN"
 _DEFAULT_REDIRECT = "http://localhost:8765"
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
@@ -78,20 +79,29 @@ def _mask(secret: str) -> str:
 
 def _write_token(env_path: Path, token: str) -> None:
     """Set (or append) ``FYERS_ACCESS_TOKEN`` in ``env_path`` without touching else."""
-    line = f"{_ENV_VAR}={token}\n"
-    if env_path.exists():
-        lines = env_path.read_text().splitlines(keepends=True)
-    else:
-        lines = []
+    write_env_values(env_path, {_ENV_VAR: token})
 
-    for i, existing in enumerate(lines):
-        if existing.lstrip().split("=", 1)[0].strip() == _ENV_VAR and not existing.lstrip().startswith("#"):
-            lines[i] = line
-            break
-    else:
-        if lines and not lines[-1].endswith("\n"):
-            lines[-1] += "\n"
-        lines.append(line)
+
+def write_env_values(env_path: Path, values: dict[str, str]) -> None:
+    """Set (or append) each ``key=value`` in ``env_path``, leaving the rest alone.
+
+    Shared with the unattended refresh so both write the file the same way —
+    a token writer that mangled the rest of the config would be a bad way to
+    find out the two had drifted apart.
+    """
+    lines = env_path.read_text().splitlines(keepends=True) if env_path.exists() else []
+
+    for key, value in values.items():
+        line = f"{key}={value}\n"
+        for i, existing in enumerate(lines):
+            stripped = existing.lstrip()
+            if stripped.split("=", 1)[0].strip() == key and not stripped.startswith("#"):
+                lines[i] = line
+                break
+        else:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append(line)
 
     env_path.write_text("".join(lines))
 
@@ -239,9 +249,24 @@ def main() -> int:
         )
         return 1
 
-    _write_token(args.env_file, access_token)
+    # The refresh token is the point of this whole exercise: it lasts about a
+    # fortnight and lets the daily access token be minted without a browser, so
+    # missing a morning stops costing a day's data.
+    refresh_token = response.get("refresh_token") if isinstance(response, dict) else None
+    values = {_ENV_VAR: access_token}
+    if refresh_token:
+        values[_REFRESH_VAR] = refresh_token
+    write_env_values(args.env_file, values)
 
     print(f"\n✓ Wrote {_ENV_VAR}={_mask(access_token)} to {args.env_file}")
+    if refresh_token:
+        print(f"✓ Wrote {_REFRESH_VAR}={_mask(refresh_token)} (valid ~15 days)")
+        print(
+            "  With FYERS_PIN also set, fyers_refresh.py can mint the daily token "
+            "unattended — no browser, no 06:00-09:15 scramble."
+        )
+    else:
+        print("! FYERS returned no refresh token; the daily login stays manual.")
     print("  Valid for today's session — start the app with the channel's broker = fyers.")
     return 0
 

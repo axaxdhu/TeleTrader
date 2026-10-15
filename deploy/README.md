@@ -10,6 +10,8 @@ supervised by systemd. These are the unit files it uses.
 | `teletrader-eod.timer` | fires the above at 15:35 IST, Mon-Fri |
 | `teletrader-token-check.service` | one-shot pre-market token check (`check_token.py`) |
 | `teletrader-token-check.timer` | fires the above at 08:45 IST, Mon-Fri |
+| `teletrader-token-refresh.service` | mints the daily token from the refresh token (`fyers_refresh.py`) |
+| `teletrader-token-refresh.timer` | fires the above at 06:30 IST, Mon-Fri |
 
 ## Installing the timers
 
@@ -38,7 +40,36 @@ uv run python eod_report.py --since 2026-09-28 --date 2026-09-30 --print  # catc
 uv run python check_token.py --print
 ```
 
-## The daily FYERS token
+## Unattended daily token refresh (recommended)
+
+The browser login is a three-hour window every morning, and missing it silently
+destroys that day's scoring — permanently, because expired contracts lose their
+history. It was missed eight days running.
+
+FYERS issues a **refresh token** (~15 days) alongside each access token, which
+mints the daily token with no browser. `fyers_login.py` now saves it; add your
+account PIN and the 06:30 timer does the rest:
+
+```bash
+# once: obtain a refresh token
+uv run python fyers_login.py --manual
+# then add to .env
+FYERS_PIN=<your 4-digit PIN>
+chmod 600 .env
+```
+
+**The tradeoff, stated plainly:** a refresh token plus a PIN mints a full
+trading token, so `.env` becomes as sensitive as the access token already in it —
+keep it `chmod 600`, and remember the droplet is the only place order placement
+is whitelisted. The PIN is sent only to the FYERS refresh endpoint and never
+logged. If you would rather not store it, leave `FYERS_PIN` unset: the refresh
+simply reports "not set up" and the manual login continues to work.
+
+A browser login is still needed roughly **fortnightly**, when the refresh token
+lapses. `fyers_refresh.py` warns on Telegram three days ahead, and again if a
+refresh ever fails.
+
+## The daily FYERS token (manual fallback)
 
 `FYERS_ACCESS_TOKEN` expires at a fixed **06:00 IST** cutoff — *not* 24 hours
 after it is issued. This is read straight from the token's own JWT `exp` claim,

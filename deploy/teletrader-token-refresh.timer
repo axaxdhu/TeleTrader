@@ -1,0 +1,15 @@
+[Unit]
+Description=Refresh the FYERS token each morning before the market opens
+
+[Timer]
+# 06:30 IST on weekdays: after the 06:00 expiry cutoff, well before the 09:15
+# open, and before the 08:45 token check so that check has something good to
+# find. Timezone inline on OnCalendar — systemd has no Timezone= key and
+# ignores unknown keys silently (see deploy/README.md).
+OnCalendar=Mon..Fri 06:30 Asia/Kolkata
+# If the box was down at 06:30, still refresh once it is back — a stale token
+# is exactly what this exists to prevent.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=TeleTrader daily FYERS token refresh (no browser)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/home/trader/TeleTrader
+Environment=HOME=/home/trader
+ExecStart=/home/trader/.local/bin/uv run python fyers_refresh.py
+# A fresh token is useless to the running listener until it re-reads .env.
+ExecStartPost=/usr/bin/systemctl restart teletrader.service
+# A failed refresh is reported on Telegram by the script itself; the unit
+# exiting 1 is information, not a fault needing systemd's attention.
+SuccessExitStatus=0 1

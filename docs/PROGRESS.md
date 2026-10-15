@@ -1093,6 +1093,40 @@ Those are different facts and the report now keeps them apart:
   appears only when it differs, and `funds_ok=None` stays takeable.
   Suite **496 passing**.
 
+## Unattended daily token refresh (completed 2026-10-15)
+
+**Why now:** the manual morning login was missed **eight consecutive days**
+(2-9 Oct), and every miss destroys that day's scoring permanently — expired
+contracts lose their history, so nothing can recover it later. The alerts fired
+each morning and were not acted on; a reminder was never going to fix a daily
+three-hour window. Of 15 unscored runs by 15 Oct, **7 are gone for good**.
+
+- **`fyers_auth.py`** — `refresh_access_token()` exchanges a FYERS refresh token
+  (~15 days) plus the account PIN for a fresh daily access token over
+  `validate-refresh-token`. Returns a result rather than raising: it runs
+  unattended before the open, so a failure must be *reported*, not vanish into a
+  timer's exit status. The app id and secret are sent as a SHA-256 `appIdHash`,
+  and no credential ever reaches a log or an error string (asserted by a test).
+- **Three distinct failures**, because the right advice differs for each:
+  `not_configured` (nothing is broken — the feature is simply off),
+  `needs_relogin` (the refresh token lapsed; retrying cannot help), and transient
+  (a network fault; it will retry tomorrow).
+- **`fyers_login.py` now saves `FYERS_REFRESH_TOKEN`** — the response always
+  carried one and it was being discarded. `write_env_values()` is now shared by
+  both writers so they cannot drift apart.
+- **`fyers_refresh.py` + `deploy/teletrader-token-refresh.{service,timer}`** —
+  **06:30 IST weekdays**: after the 06:00 expiry cutoff, before the 09:15 open,
+  and before the 08:45 check so that check finds a good token.
+  `ExecStartPost` restarts the listener, since a fresh token is useless until
+  `.env` is re-read. `Persistent=true` so a box that was down still refreshes.
+- **Warns three days before the refresh token lapses**, so the fortnightly
+  browser login happens calmly rather than being discovered on a morning when it
+  has already failed.
+- **The tradeoff is the user's:** this needs the PIN in `.env`, which is why it
+  was rejected in July. Nothing runs unless `FYERS_PIN` and
+  `FYERS_REFRESH_TOKEN` are both set; without them the manual login is unchanged.
+- Tests: `test_fyers_auth.py` (15). Suite **513 passing**.
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -1155,7 +1189,7 @@ Those are different facts and the report now keeps them apart:
 
 ## Next
 
-*(reviewed 2026-10-02; suite 496 passing)*
+*(reviewed 2026-10-15; suite 513 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.
