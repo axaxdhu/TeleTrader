@@ -1155,6 +1155,27 @@ category the evidence suggests might be profitable — the worst possible
 selection bias. And the MISSED alerts had been firing on Telegram the whole time.
 Suite **527 passing**.
 
+## Index signals mean the current weekly (confirmed 2026-10-15)
+
+Stated by the user: channel 2's index signals are **always** based on the
+nearest weekly expiry. Verified against the live master — the resolver already
+does this, because "earliest expiry on or after the signal date" happens to give
+it:
+
+```
+signal 15 Oct -> NIFTY26O19...  exp 19 Oct   (current weekly)
+signal 19 Oct -> NIFTY26O19...  exp 19 Oct   (expiry day itself)
+signal 20 Oct -> NIFTY26OCT...  exp 27 Oct   (rolls to the next)
+```
+
+No fix needed, but it was correct only as a **side effect** of the general rule,
+with nothing asserting it. Tests now pin all four cases (current weekly chosen
+over the monthly, expiry day, roll-over, never a later expiry) and the docstring
+states the assumption. A weekly and a monthly on the same strike carry materially
+different premiums, so resolving to the wrong one would give a P&L that is wrong
+while looking entirely plausible — a silent failure of exactly the kind this
+project keeps turning up.
+
 ## Git state
 
 - `.env`, `*.session`, `.venv/` are gitignored and NOT committed.
@@ -1217,7 +1238,7 @@ Suite **527 passing**.
 
 ## Next
 
-*(reviewed 2026-10-15; suite 527 passing)*
+*(reviewed 2026-10-15; suite 531 passing)*
 
 All phases (1–5) are complete and **wired end-to-end**, plus trade-management
 commands, a second (parse-only) channel, FYERS, and Telegram bot notifications.

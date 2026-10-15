@@ -111,7 +111,16 @@ class FyersInstrumentResolver:
     ) -> ResolvedInstrument:
         """Return the nearest-expiry FYERS contract for the option, or raise.
 
-        Picks the contract whose expiry is the earliest on or after ``on_date``.
+        Picks the contract whose expiry is the earliest on or after ``on_date``,
+        which is what the signal channels mean: **index signals always refer to
+        the current weekly expiry**, never a later one, and on expiry day they
+        mean that day's contract. Stock options list only a monthly, so the same
+        rule gives the right answer there too.
+
+        This matters more than it looks. A weekly and a monthly on the same
+        strike carry materially different premiums, so resolving to the wrong one
+        would produce a P&L that is wrong while looking entirely plausible.
+
         Raises :class:`InstrumentNotFoundError` if the master has no such contract.
         """
         self._ensure_index(on_date)

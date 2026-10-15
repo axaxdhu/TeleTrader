@@ -335,3 +335,66 @@ def _punctuated_resolver() -> FyersInstrumentResolver:
 )
 def test_real_channel2_spellings_resolve(spoken: str, lot_size: int) -> None:
     assert _punctuated_resolver().lot_size_for(spoken, on_date=ON) == lot_size
+
+
+# --- Index signals always mean the current weekly -----------------------------
+#
+# Stated by the user 2026-10-15: channel 2's index signals are always based on
+# the nearest weekly expiry, never a later one. Nearest-expiry selection already
+# gives that, but only as a side effect of the general rule — these pin it, so a
+# change to the resolver cannot quietly start pricing index trades against the
+# wrong contract. (A monthly premium differs enough from a weekly to turn a
+# winner into a loser in the P&L.)
+
+WEEKLY_ROWS: list[dict[str, Any]] = [
+    # Same underlying, strike and type, three expiries: two weeklies and the
+    # monthly — exactly what the live NIFTY master looks like.
+    _row("NIFTY", "PE", 22500, "NSE:NIFTY26O1922500PE", date(2026, 10, 19), lot_size=65),
+    _row("NIFTY", "PE", 22500, "NSE:NIFTY26OCT22500PE", date(2026, 10, 27), lot_size=65),
+    _row("NIFTY", "PE", 22500, "NSE:NIFTY26N0322500PE", date(2026, 11, 3), lot_size=65),
+]
+
+
+def _weekly_resolver() -> FyersInstrumentResolver:
+    return FyersInstrumentResolver(FakeSource(WEEKLY_ROWS))
+
+
+def test_an_index_signal_takes_the_current_weekly_not_the_monthly() -> None:
+    resolved = _weekly_resolver().resolve(
+        "NIFTY", 22500, "PE", on_date=date(2026, 10, 15)
+    )
+
+    assert resolved.expiry == date(2026, 10, 19)
+    assert resolved.tradingsymbol == "NSE:NIFTY26O1922500PE"
+
+
+def test_a_signal_on_expiry_day_uses_that_days_contract() -> None:
+    # It expires in hours, but that is the contract the channel is referring to.
+    resolved = _weekly_resolver().resolve(
+        "NIFTY", 22500, "PE", on_date=date(2026, 10, 19)
+    )
+
+    assert resolved.expiry == date(2026, 10, 19)
+
+
+def test_the_day_after_expiry_rolls_to_the_next_weekly() -> None:
+    resolved = _weekly_resolver().resolve(
+        "NIFTY", 22500, "PE", on_date=date(2026, 10, 20)
+    )
+
+    assert resolved.expiry == date(2026, 10, 27)
+
+
+def test_a_later_expiry_is_never_preferred() -> None:
+    # The failure that would matter: pricing a weekly signal against a monthly
+    # contract. Its premium is materially different, so the P&L would be wrong
+    # while looking entirely plausible.
+    for on_date, expected in (
+        (date(2026, 10, 1), date(2026, 10, 19)),
+        (date(2026, 10, 19), date(2026, 10, 19)),
+        (date(2026, 10, 21), date(2026, 10, 27)),
+        (date(2026, 10, 28), date(2026, 11, 3)),
+    ):
+        assert _weekly_resolver().resolve(
+            "NIFTY", 22500, "PE", on_date=on_date
+        ).expiry == expected
